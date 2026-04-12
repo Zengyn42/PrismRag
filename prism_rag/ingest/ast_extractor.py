@@ -118,9 +118,14 @@ def _category_node_id(category: str) -> str:
     return f"category:{category}"
 
 
-def _rough_token_count(text: str) -> int:
-    """Rough token estimate (chars / 4). Replace with tiktoken in a follow-up."""
-    return max(1, len(text) // 4)
+import tiktoken
+
+_enc = tiktoken.get_encoding("cl100k_base")
+
+
+def _token_count(text: str) -> int:
+    """Precise token count using tiktoken cl100k_base encoding."""
+    return max(1, len(_enc.encode(text)))
 
 
 # ── Main entrypoint ──────────────────────────────────────────────────
@@ -150,7 +155,7 @@ def extract_ast(graph: KnowledgeGraph, docs: list[VaultDocument]) -> None:
             source_file=str(doc.relative_path),
             content=doc.content,
             content_hash=doc.content_hash,
-            tokens=_rough_token_count(doc.content),
+            tokens=_token_count(doc.content),
             frontmatter=doc.frontmatter,
         )
         graph.add_node(note)

@@ -242,6 +242,31 @@ def info(
 
 
 @app.command()
+def serve(
+    transport: str = typer.Option("stdio", "--transport", "-t", help="MCP transport: stdio or sse"),
+) -> None:
+    """Start the PrismRag MCP Server.
+
+    Exposes 5 tools for knowledge graph queries:
+    search_knowledge, explain_node, trace_path, list_communities, explore_community.
+    """
+    from prism_rag.mcp_server.server import run_server
+
+    settings = PrismRagSettings()
+    if not settings.graph_path.exists():
+        typer.secho(
+            f"❌ Graph not found: {settings.graph_path}\n   Run 'prism-rag ingest' first.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    typer.secho(f"🚀 Starting MCP Server (transport={transport})...", fg=typer.colors.GREEN)
+    typer.echo(f"   Graph: {settings.graph_path}")
+    run_server(transport=transport)
+
+
+@app.command()
 def version() -> None:
     """Print PrismRag version."""
     typer.echo(f"PrismRag v{__version__}")
