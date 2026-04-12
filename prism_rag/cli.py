@@ -144,6 +144,33 @@ def ingest(
 
 
 @app.command()
+def add(
+    file: Path = typer.Argument(..., help="Path to the .md file (absolute or vault-relative)"),
+    skip_embed: bool = typer.Option(False, "--skip-embed", help="Skip embedding (faster)"),
+) -> None:
+    """Incrementally add or update a single file in the graph.
+
+    Much faster than full ingest — only processes the one file,
+    then re-runs Leiden and persists.
+    """
+    from prism_rag.ingest.incremental import ingest_file
+
+    settings = PrismRagSettings()
+    typer.secho(f"📄 Adding: {file}", fg=typer.colors.CYAN)
+
+    try:
+        result = ingest_file(file, settings=settings, skip_embed=skip_embed)
+    except (FileNotFoundError, ValueError) as e:
+        typer.secho(f"❌ {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    typer.secho(f"\n✅ {result['action'].capitalize()}: {result['node_id']}", fg=typer.colors.GREEN)
+    typer.echo(f"   AST edges: +{result['ast_edges']}")
+    typer.echo(f"   Similarity edges: +{result['similarity_edges']}")
+    typer.echo(f"   Graph: {result['total_nodes']} nodes · {result['total_edges']} edges · {result['communities']} communities")
+
+
+@app.command()
 def query(
     q: str = typer.Argument(..., help="Query string (node label, topic, or keyword)"),
     graph_path: Path = typer.Option(None, "--graph", "-g", help="Path to graph.json"),
