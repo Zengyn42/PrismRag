@@ -1,15 +1,13 @@
 """PrismRag CLI entrypoint (Typer).
 
-Phase 1 MVP commands:
-  prism-rag ingest    Run the AST-only pipeline on the configured vault
+Commands:
+  prism-rag ingest    Build the knowledge graph (Pass 1 + 3 + 4 + 5)
+  prism-rag query     Query the graph via BFS/DFS traversal
   prism-rag info      Print stats about an existing graph.json
   prism-rag version   Print the package version
 
-Future commands (not yet implemented):
-  prism-rag embed     Run Pass 3 (Gemini Embedding 2 + similarity edges)
-  prism-rag media     Run Pass 2 (image/PDF/audio ingestion)
+Future:
   prism-rag serve     Start the MCP Server
-  prism-rag query     Ad-hoc graph traversal query
 """
 
 from __future__ import annotations
@@ -27,7 +25,6 @@ from prism_rag.ingest.vault_loader import load_vault
 from prism_rag.report.graph_report import generate_report
 from prism_rag.store.graph import KnowledgeGraph
 
-# Configure basic logging; users can override via LOGLEVEL env var if needed
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -40,11 +37,7 @@ app = typer.Typer(
 )
 
 
-def _resolve_settings(
-    vault: Path | None,
-    output: Path | None,
-) -> PrismRagSettings:
-    """Build a Settings object, with CLI options overriding env vars."""
+def _resolve_settings(vault: Path | None, output: Path | None) -> PrismRagSettings:
     settings = PrismRagSettings()
     if vault is not None:
         settings.vault_path = vault.expanduser().resolve()
@@ -55,40 +48,15 @@ def _resolve_settings(
 
 @app.command()
 def ingest(
-    vault: Path = typer.Option(  # noqa: B008
-        None,
-        "--vault",
-        "-v",
-        help="Vault path (overrides PRISM_VAULT_PATH)",
-    ),
-    output: Path = typer.Option(  # noqa: B008
-        None,
-        "--output",
-        "-o",
-        help="Output dir (overrides PRISM_DATA_DIR)",
-    ),
-    skip_cluster: bool = typer.Option(
-        False,
-        "--skip-cluster",
-        help="Skip Leiden community detection (useful for quick AST-only runs)",
-    ),
-    skip_report: bool = typer.Option(
-        False,
-        "--skip-report",
-        help="Skip GRAPH_REPORT.md generation",
-    ),
+    vault: Path = typer.Option(None, "--vault", "-v", help="Vault path"),
+    output: Path = typer.Option(None, "--output", "-o", help="Output dir"),
+    skip_cluster: bool = typer.Option(False, "--skip-cluster"),
+    skip_report: bool = typer.Option(False, "--skip-report"),
+    skip_embed: bool = typer.Option(False, "--skip-embed", help="Skip Pass 3 embedding + similarity edges"),
 ) -> None:
-    """Build the knowledge graph from the vault (AST-only MVP).
+    """Build the knowledge graph from the vault.
 
-    Pipeline passes executed:
-      1a. Vault loading (discovery + frontmatter)
-      1b. AST extraction (wikilinks, tags, frontmatter, category)
-      4.  Leiden community detection (unless --skip-cluster)
-      5.  JSON persistence + GRAPH_REPORT.md (unless --skip-report)
-
-    NOT run in MVP:
-      2.  Media (image/PDF/audio) — requires [media] extras
-      3.  Embedding + similarity edges — requires Gemini API key
+    Pipeline: Pass 1 (AST) → Pass 3 (Embedding) → Pass 4 (Leiden) → Pass 5 (Persist + Report)
     """
     settings = _resolve_settings(vault, output)
 
@@ -100,24 +68,44 @@ def ingest(
         typer.secho(f"❌ Vault path does not exist: {settings.vault_path}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
 
-    # ── Pass 1a: Load vault ──────────────────────────────────────────
+    # ── Pass 1a: Load vault ──
     typer.secho("🔍 Pass 1a: Discovering markdown files...", fg=typer.colors.BLUE)
     docs = load_vault(settings.vault_path)
     typer.echo(f"   Found {len(docs)} markdown files")
 
     if not docs:
-        typer.secho("⚠️  No markdown files found — nothing to do.", fg=typer.colors.YELLOW)
+        typer.secho("⚠️  No markdown files found.", fg=typer.colors.YELLOW)
         raise typer.Exit(0)
 
-    # ── Pass 1b: AST extraction ──────────────────────────────────────
+    # ── Pass 1b: AST extraction ──
     typer.secho("\n🧩 Pass 1b: Extracting wikilinks, tags, frontmatter...", fg=typer.colors.BLUE)
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
     typer.echo(f"   Nodes: {graph.node_count} · Edges: {graph.edge_count}")
 
-    # ── Pass 4: Leiden clustering ────────────────────────────────────
+    # ── Pass 3: Embedding + similarity edges ──
+    if skip_embed:
+        typer.secho("\n⏭  Pass 3: Embedding (skipped by --skip-embed)", fg=typer.colors.YELLOW)
+    elif not settings.gemini_api_key:
+        typer.secho(
+            "\n⏭  Pass 3: Embedding (skipped — no PRISM_GEMINI_API_KEY set)",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        from prism_rag.ingest.embedder import compute_embeddings
+        from prism_rag.ingest.similarity_linker import link_similar_nodes
+
+        typer.secho("\n🧬 Pass 3a: Computing embeddings (Gemini Embedding 2)...", fg=typer.colors.BLUE)
+        vectors = compute_embeddings(graph, settings)
+        typer.echo(f"   Embedded {len(vectors)} nodes (dim=768)")
+
+        typer.secho("\n🔗 Pass 3b: Generating similarity edges...", fg=typer.colors.BLUE)
+        n_new = link_similar_nodes(graph, vectors, settings)
+        typer.echo(f"   New edges: {n_new} · Total edges: {graph.edge_count}")
+
+    # ── Pass 4: Leiden clustering ──
     if skip_cluster:
-        typer.secho("\n⏭  Pass 4: Leiden clustering (skipped by --skip-cluster)", fg=typer.colors.YELLOW)
+        typer.secho("\n⏭  Pass 4: Leiden clustering (skipped)", fg=typer.colors.YELLOW)
     else:
         typer.secho("\n🧠 Pass 4: Leiden community detection...", fg=typer.colors.BLUE)
         n_communities = run_leiden(
@@ -128,14 +116,12 @@ def ingest(
         )
         typer.echo(f"   Communities: {n_communities}")
 
-    # ── Pass 5: Persistence + report ─────────────────────────────────
+    # ── Pass 5: Persistence + report ──
     typer.secho("\n💾 Pass 5: Persisting graph...", fg=typer.colors.BLUE)
     graph.save(settings.graph_path)
     typer.echo(f"   → {settings.graph_path}")
 
-    if skip_report:
-        typer.secho("⏭  GRAPH_REPORT.md (skipped by --skip-report)", fg=typer.colors.YELLOW)
-    else:
+    if not skip_report:
         typer.secho("\n📝 Pass 5: Generating GRAPH_REPORT.md...", fg=typer.colors.BLUE)
         generate_report(graph, settings.report_path, vault_root=settings.vault_path)
         typer.echo(f"   → {settings.report_path}")
@@ -144,13 +130,69 @@ def ingest(
 
 
 @app.command()
+def query(
+    q: str = typer.Argument(..., help="Query string (node label, topic, or keyword)"),
+    graph_path: Path = typer.Option(None, "--graph", "-g", help="Path to graph.json"),
+    budget: int = typer.Option(4000, "--budget", "-b", help="Token budget"),
+    mode: str = typer.Option("bfs", "--mode", "-m", help="Traversal mode: bfs or dfs"),
+    show_content: bool = typer.Option(False, "--content", "-c", help="Show node content"),
+) -> None:
+    """Query the knowledge graph via BFS/DFS traversal."""
+    from prism_rag.retrieve.bfs import bfs_traverse
+    from prism_rag.retrieve.dfs import dfs_traverse
+    from prism_rag.retrieve.entry import resolve_entry_point
+
+    settings = PrismRagSettings()
+    path = graph_path or settings.graph_path
+
+    if not path.exists():
+        typer.secho(f"❌ Graph not found: {path}", fg=typer.colors.RED, err=True)
+        typer.secho("   Run 'prism-rag ingest' first.", err=True)
+        raise typer.Exit(1)
+
+    graph = KnowledgeGraph.load(path)
+
+    # Resolve entry point
+    entry = resolve_entry_point(graph, q)
+    if entry is None:
+        typer.secho(f"❌ No matching node for query: {q!r}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    entry_label = graph.g.nodes[entry].get("label", entry)
+    typer.secho(f"🎯 Entry: {entry_label} ({entry})", fg=typer.colors.CYAN)
+
+    # Traverse
+    if mode == "dfs":
+        nodes = dfs_traverse(graph, entry, budget=budget)
+    else:
+        nodes = bfs_traverse(graph, entry, budget=budget)
+
+    typer.secho(
+        f"📊 Traversed {len(nodes)} nodes · ~{sum(n.get('tokens', 0) for n in nodes):,} tokens",
+        fg=typer.colors.CYAN,
+    )
+    typer.echo("")
+
+    for i, node in enumerate(nodes):
+        kind = node.get("kind", "?")
+        label = node.get("label", node["id"])
+        tokens = node.get("tokens", 0)
+        community = node.get("community_id", "—")
+        marker = "►" if i == 0 else " "
+
+        typer.echo(f"  {marker} [{kind}] {label} ({tokens} tokens, {community})")
+
+        if show_content and node.get("content"):
+            content = node["content"][:300]
+            if len(node.get("content", "")) > 300:
+                content += "..."
+            typer.secho(f"    {content}", fg=typer.colors.WHITE, dim=True)
+            typer.echo("")
+
+
+@app.command()
 def info(
-    graph_path: Path = typer.Option(  # noqa: B008
-        None,
-        "--graph",
-        "-g",
-        help="Path to graph.json (default: from settings)",
-    ),
+    graph_path: Path = typer.Option(None, "--graph", "-g", help="Path to graph.json"),
 ) -> None:
     """Print stats about an existing graph.json."""
     settings = PrismRagSettings()
@@ -166,17 +208,23 @@ def info(
     typer.echo(f"   Edges:       {graph.edge_count}")
     typer.echo(f"   Communities: {len(graph.communities)}")
 
+    # Edge type breakdown
+    edge_types: dict[str, int] = {}
+    for _, _, data in graph.g.edges(data=True):
+        r = data.get("relation", "?")
+        edge_types[r] = edge_types.get(r, 0) + 1
+    if edge_types:
+        typer.echo("\n   Edge types:")
+        for r, count in sorted(edge_types.items(), key=lambda x: -x[1]):
+            typer.echo(f"     {r}: {count}")
+
     if graph.communities:
-        typer.echo("\n   Top 5 communities by size:")
+        typer.echo("\n   Top 5 communities:")
         sorted_comms = sorted(
-            graph.communities.values(),
-            key=lambda c: c.member_count,
-            reverse=True,
+            graph.communities.values(), key=lambda c: c.member_count, reverse=True
         )[:5]
         for comm in sorted_comms:
-            typer.echo(
-                f"   - {comm.id}: {comm.member_count} members ({comm.label})"
-            )
+            typer.echo(f"   - {comm.id}: {comm.member_count} members ({comm.label})")
 
 
 @app.command()
