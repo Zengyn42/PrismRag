@@ -126,6 +126,20 @@ def ingest(
         generate_report(graph, settings.report_path, vault_root=settings.vault_path)
         typer.echo(f"   → {settings.report_path}")
 
+    # ── Visualization (if pyvis is installed) ──
+    try:
+        from prism_rag.report.visualize import generate_html
+
+        viz_path = settings.data_dir / "graph.html"
+        typer.secho("\n🎨 Generating interactive visualization...", fg=typer.colors.BLUE)
+        generate_html(graph, viz_path)
+        typer.echo(f"   → {viz_path}")
+    except ImportError:
+        typer.secho(
+            "\n⏭  Visualization skipped (install pyvis: pip install prism-rag[viz])",
+            fg=typer.colors.YELLOW,
+        )
+
     typer.secho("\n✅ Ingest complete.", fg=typer.colors.GREEN)
 
 
