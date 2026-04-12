@@ -1,35 +1,62 @@
 [project]
 name = "prism-rag"
 version = "0.0.1"
-description = "无垠智穹多模态 RAG 系统 — 从 NimbusVault 抽取知识，通过 MCP Server 提供跨模态语义检索"
+description = "无垠智穹图优先 RAG 系统 — Obsidian 知识图谱构建、Leiden 社区发现、MCP Server 检索接口"
 authors = [{ name = "Zengyn42", email = "hani@wuyin.ai" }]
 license = { text = "Proprietary" }
 readme = "README.md"
 requires-python = ">=3.11"
-keywords = ["rag", "obsidian", "lancedb", "gemini", "mcp", "multimodal"]
+keywords = ["rag", "obsidian", "knowledge-graph", "graphrag", "leiden", "gemini", "mcp"]
 
 dependencies = [
-    # Embedding: Gemini Embedding 2 (multi-modal, 2026.3.10 release)
+    # ── Graph (core storage + traversal) ─────────────────────────────
+    "networkx>=3.3",
+    # Leiden community detection (canonical implementation)
+    "leidenalg>=0.10.2",
+    "python-igraph>=0.11.5",
+
+    # ── Embedding (INDEX-time only: global similarity edges + multimodal bridge) ─
+    # NOT used for query-time retrieval — that's pure graph traversal.
     "google-genai>=0.3.0",
-    # Storage: LanceDB (embedded, unified chunks/atoms/relations)
+    # LanceDB as embedding cache only (not primary store)
     "lancedb>=0.15.0",
     "pyarrow>=16.0",
-    # MCP Server protocol
+
+    # ── MCP Server ───────────────────────────────────────────────────
     "mcp>=1.0.0",
-    # Obsidian vault parsing
+
+    # ── Obsidian vault parsing ───────────────────────────────────────
     "python-frontmatter>=1.1.0",
-    # Chunking: token counting
+    # Markdown AST (wikilinks / callouts / block refs extraction)
+    "markdown-it-py>=3.0",
+
+    # ── Token counting (chunker + query budget) ──────────────────────
     "tiktoken>=0.8.0",
-    # Config / validation
+
+    # ── Config / validation ──────────────────────────────────────────
     "pydantic>=2.8.0",
     "pydantic-settings>=2.5.0",
-    # CLI
+
+    # ── CLI ──────────────────────────────────────────────────────────
     "typer>=0.12.0",
-    # Logging
+
+    # ── Logging ──────────────────────────────────────────────────────
     "structlog>=24.0",
 ]
 
 [project.optional-dependencies]
+# Multimodal ingestion: images / PDFs / audio → text nodes
+media = [
+    "pypdf>=5.0",
+    "pillow>=10.0",
+    "faster-whisper>=1.0",
+]
+
+# Visualization: interactive HTML graph
+viz = [
+    "pyvis>=0.3.2",
+]
+
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -38,19 +65,12 @@ dev = [
     "mypy>=1.11",
 ]
 
-# Phase 2: GraphRAG dependencies (Leiden community detection, cross-encoder re-ranking)
-graph = [
-    "networkx>=3.3",
-    "python-louvain>=0.16",
-    "sentence-transformers>=3.0",
-]
-
 [project.scripts]
 prism-rag = "prism_rag.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/Zengyn42/PrismRag"
-"Design Doc" = "https://github.com/Zengyn42/NimbusVault/blob/master/knowledge/Obsidian多模态RAG系统架构设计.md"
+"Design Doc" = "https://github.com/Zengyn42/NimbusVault/blob/master/knowledge/PrismRag-v4.0-设计文档.md"
 
 [build-system]
 requires = ["hatchling>=1.25"]
@@ -66,7 +86,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B", "SIM", "RUF"]
-ignore = ["E501"]  # line length (handled by formatter)
+ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"
