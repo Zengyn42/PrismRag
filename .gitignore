@@ -56,3 +56,7 @@ logs/
 # Runtime
 *.pid
 *.sock
+
+# Virtual env
+.venv/
+
