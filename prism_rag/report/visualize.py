@@ -102,8 +102,9 @@ def generate_html(
         font_color=font_color,
         directed=True,
         notebook=False,
-        select_menu=True,
-        filter_menu=True,
+        select_menu=False,
+        filter_menu=False,
+        cdn_resources="remote",
     )
 
     # Physics: Barnes-Hut force-directed layout

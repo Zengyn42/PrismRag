@@ -60,3 +60,4 @@ logs/
 # Virtual env
 .venv/
 
+lib/
