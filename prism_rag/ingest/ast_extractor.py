@@ -148,6 +148,12 @@ def extract_ast(graph: KnowledgeGraph, docs: list[VaultDocument]) -> None:
     all_categories: set[str] = set()
 
     for doc in docs:
+        # Six-space Am attributes: read from frontmatter (populated by Agent at write time)
+        fm = doc.frontmatter
+        _maturity = fm.get("maturity")
+        _confidence = fm.get("confidence")
+        _actionability = fm.get("actionability")
+
         note = Node(
             id=doc.id,
             label=doc.label,
@@ -157,6 +163,9 @@ def extract_ast(graph: KnowledgeGraph, docs: list[VaultDocument]) -> None:
             content_hash=doc.content_hash,
             tokens=_token_count(doc.content),
             frontmatter=doc.frontmatter,
+            maturity=_maturity if _maturity in ("seed", "growing", "mature", "archived") else None,
+            confidence=_confidence if _confidence in ("high", "medium", "low") else None,
+            actionability=_actionability if _actionability in ("reference", "decision", "task") else None,
         )
         graph.add_node(note)
 

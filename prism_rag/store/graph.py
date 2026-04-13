@@ -10,7 +10,8 @@ JSON format (persisted to graph.json):
       "metadata": {"version", "generated_at", "node_count", "edge_count"},
       "nodes": [
         {"id", "label", "kind", "source_file", "content", "content_hash",
-         "tokens", "frontmatter", "community_id"}
+         "tokens", "frontmatter", "community_id",
+         "maturity", "confidence", "actionability"}
       ],
       "edges": [
         {"source", "target", "relation", "confidence", "confidence_score",
@@ -50,6 +51,15 @@ Confidence = Literal["EXTRACTED", "INFERRED", "AMBIGUOUS"]
 NodeKind = Literal["note", "tag", "category", "image", "pdf", "audio", "section", "block"]
 SourcePass = Literal["ast", "media", "embedding", "llm"]
 
+# ── Six-space Am attributes (K-space attribute dimension) ─────────────────
+# Derived from Wang Yanzhang's Six-Space Theory, K-space (knowledge element
+# space) Am (attribute) dimension. These three attributes describe knowledge
+# element metadata, populated by Agents (e.g. Jei) at write time, defined
+# and persisted by PrismRag at schema level.
+Maturity = Literal["seed", "growing", "mature", "archived"]
+ConfidenceLevel = Literal["high", "medium", "low"]
+Actionability = Literal["reference", "decision", "task"]
+
 
 @dataclass
 class Node:
@@ -64,6 +74,11 @@ class Node:
     tokens: int = 0
     frontmatter: dict[str, Any] = field(default_factory=dict)
     community_id: str | None = None
+
+    # Six-space Am attributes (populated by Agent, persisted by PrismRag)
+    maturity: Maturity | None = None          # knowledge maturity: seed → growing → mature → archived
+    confidence: ConfidenceLevel | None = None  # source reliability: high / medium / low
+    actionability: Actionability | None = None # actionability type: reference / decision / task
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
