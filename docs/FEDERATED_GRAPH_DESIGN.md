@@ -48,6 +48,36 @@ MCP-3 (Agent Z)     │ load: [B]           → searches B only       │
 | **Store** | graph.json persistence | 1 vault = 1 graph.json |
 | **Serve** | Load N graphs at startup, build bridges at runtime | Per-MCP-instance, configured via `graphs` list |
 
+## Multi-Graph Load Modes
+
+When loading multiple graphs, the MCP instance can operate in two modes:
+
+| Mode | Behavior | Use Case |
+|---|---|---|
+| **`federated`** (default) | Each graph stays independent; bridge edges computed at runtime; Leiden communities per-graph; results prefixed with namespace | Vaults with different domains (tech vault + personal vault); need access control per-vault |
+| **`merged`** | All graphs merged into one unified graph at startup; Leiden re-clustered on the merged graph; single community structure; no namespace prefixes | Vaults with highly related content (design docs vault + implementation vault); want cross-vault communities |
+
+```
+federated mode:                          merged mode:
+┌─────────┐  bridge  ┌─────────┐         ┌──────────────────────┐
+│ Graph-A  │◄──────►│ Graph-B  │         │   Unified Graph      │
+│ (Leiden) │         │ (Leiden) │         │   (re-Leiden on all) │
+└─────────┘         └─────────┘         └──────────────────────┘
+  independent         independent          single community set
+  communities         communities          nodes prefixed A::, B::
+```
+
+### Federated vs Merged trade-offs
+
+| Dimension | Federated | Merged |
+|---|---|---|
+| Leiden communities | Per-graph (independent) | Unified (cross-vault communities emerge) |
+| Startup cost | Cheap (load + bridge) | Expensive (load + merge + re-Leiden) |
+| Incremental update | Re-ingest one vault, rebuild bridges only | Re-ingest one vault, re-Leiden entire merged graph |
+| Access control | Natural (load different graphs per MCP) | All-or-nothing (merged graph contains everything) |
+| Cross-vault discovery | Via bridge edges (explicit) | Native (same graph, same traversal) |
+| Node ID conflicts | No conflict (namespaced) | Prefix-based dedup (A::note, B::note) |
+
 ## Configuration
 
 ```python
@@ -60,6 +90,7 @@ class GraphSource(BaseModel):
 
 class PrismRagSettings(BaseSettings):
     graphs: list[GraphSource]   # replaces single vault_path
+    multi_graph_mode: str = "federated"  # "federated" or "merged"
 ```
 
 ### Example: single graph (backward compatible)
@@ -218,16 +249,17 @@ single-vault mode:
 
 ## Design Decisions
 
-### Why federated (not merged)?
+### Why default to federated?
 
-A single merged graph would:
-- Couple vault ingestion (changing vault A triggers re-clustering of the entire graph)
-- Mix Leiden communities across unrelated content domains
-- Make it impossible to serve a single vault without the others
-- Lose the ability to assign different agents different vault access
+Federated is the default because it preserves per-vault independence:
+- Changing vault A does not trigger re-clustering of vault B
+- Different agents can load different vault subsets (access control)
+- Startup is cheap (no re-Leiden)
 
-Federation preserves per-vault independence while enabling cross-vault discovery
-at the serve layer.
+Merged mode is available for the case where vaults are tightly coupled and
+cross-vault communities are valuable (e.g., a design-docs vault and an
+implementation vault that should cluster together). The user chooses via
+`multi_graph_mode` config.
 
 ### Why bridge at serve-time (not ingest-time)?
 
