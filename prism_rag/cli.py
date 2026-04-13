@@ -271,25 +271,57 @@ def info(
 @app.command()
 def serve(
     transport: str = typer.Option("stdio", "--transport", "-t", help="MCP transport: stdio or sse"),
+    skip_rebuild: bool = typer.Option(False, "--skip-rebuild", help="Skip auto-ingest on startup"),
 ) -> None:
     """Start the PrismRag MCP Server.
 
-    Exposes 5 tools for knowledge graph queries:
-    search_knowledge, explain_node, trace_path, list_communities, explore_community.
+    On startup, automatically runs a full ingest to ensure the graph is fresh.
+    Use --skip-rebuild to start with the existing graph.json.
+
+    Exposes 5 tools: search_knowledge, explain_node, trace_path,
+    list_communities, explore_community.
     """
     from prism_rag.mcp_server.server import run_server
 
     settings = PrismRagSettings()
-    if not settings.graph_path.exists():
+
+    if not skip_rebuild and settings.vault_path.exists():
+        typer.secho("🔄 Auto-rebuilding graph on startup...", fg=typer.colors.BLUE, err=True)
+        # Run full ingest inline (reuse the ingest logic)
+        from prism_rag.ingest.vault_loader import load_vault
+        from prism_rag.ingest.ast_extractor import extract_ast
+
+        docs = load_vault(settings.vault_path)
+        graph = KnowledgeGraph()
+        extract_ast(graph, docs)
+
+        if settings.gemini_api_key:
+            from prism_rag.ingest.embedder import compute_embeddings
+            from prism_rag.ingest.similarity_linker import link_similar_nodes
+            vectors = compute_embeddings(graph, settings)
+            if vectors:
+                link_similar_nodes(graph, vectors, settings)
+
+        run_leiden(graph, resolution=settings.leiden_resolution, seed=settings.leiden_seed)
+        graph.save(settings.graph_path)
+        generate_report(graph, settings.report_path, vault_root=settings.vault_path)
+
         typer.secho(
-            f"❌ Graph not found: {settings.graph_path}\n   Run 'prism-rag ingest' first.",
+            f"   ✅ Graph rebuilt: {graph.node_count} nodes · {graph.edge_count} edges · "
+            f"{len(graph.communities)} communities",
+            fg=typer.colors.GREEN,
+            err=True,
+        )
+    elif not settings.graph_path.exists():
+        typer.secho(
+            f"❌ Graph not found: {settings.graph_path}\n"
+            f"   Run 'prism-rag ingest' first, or remove --skip-rebuild.",
             fg=typer.colors.RED,
             err=True,
         )
         raise typer.Exit(1)
 
-    typer.secho(f"🚀 Starting MCP Server (transport={transport})...", fg=typer.colors.GREEN)
-    typer.echo(f"   Graph: {settings.graph_path}")
+    typer.secho(f"🚀 Starting MCP Server (transport={transport})...", fg=typer.colors.GREEN, err=True)
     run_server(transport=transport)
 
 
