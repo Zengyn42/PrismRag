@@ -54,7 +54,7 @@ SourcePass = Literal["ast", "media", "embedding", "llm"]
 # ── Six-space Am attributes (K-space attribute dimension) ─────────────────
 # Derived from Wang Yanzhang's Six-Space Theory, K-space (knowledge element
 # space) Am (attribute) dimension. These three attributes describe knowledge
-# element metadata, populated by Agents (e.g. Jei) at write time, defined
+# element metadata, populated by Agents at write time, defined
 # and persisted by PrismRag at schema level.
 Maturity = Literal["seed", "growing", "mature", "archived"]
 ConfidenceLevel = Literal["high", "medium", "low"]
@@ -75,7 +75,7 @@ class Node:
     frontmatter: dict[str, Any] = field(default_factory=dict)
     community_id: str | None = None
 
-    # Six-space Am attributes (populated by Agent, persisted by PrismRag)
+    # Am attributes (populated by upstream Agent, persisted by PrismRag)
     maturity: Maturity | None = None          # knowledge maturity: seed → growing → mature → archived
     confidence: ConfidenceLevel | None = None  # source reliability: high / medium / low
     actionability: Actionability | None = None # actionability type: reference / decision / task
