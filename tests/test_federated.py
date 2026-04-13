@@ -252,3 +252,25 @@ class TestFederatedLoader:
         fg = FederatedGraph.load(sources)
         assert fg.node_count == 1
         assert fg.namespaces == ["ns1"]
+
+
+# -- Task 7: MCP server federated integration --------------------------------
+
+
+class TestMCPFederatedIntegration:
+    def test_ensure_federated_returns_federated_graph(self, tmp_path, monkeypatch):
+        from prism_rag.mcp_server import server as mcp_mod
+
+        g = _make_graph([("a", "Session Management")])
+        d = tmp_path / "data"
+        d.mkdir()
+        g.save(d / "graph.json")
+
+        monkeypatch.setenv("PRISM_VAULT_PATH", str(tmp_path / "vault"))
+        monkeypatch.setenv("PRISM_DATA_DIR", str(d))
+        monkeypatch.delenv("PRISM_GRAPHS", raising=False)
+
+        mcp_mod._federated = None
+        fg = mcp_mod._ensure_federated()
+        assert isinstance(fg, FederatedGraph)
+        assert fg.node_count == 1
