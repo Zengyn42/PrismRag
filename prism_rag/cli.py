@@ -50,6 +50,7 @@ def _resolve_settings(vault: Path | None, output: Path | None) -> PrismRagSettin
 def ingest(
     vault: Path = typer.Option(None, "--vault", "-v", help="Vault path"),
     output: Path = typer.Option(None, "--output", "-o", help="Output dir"),
+    namespace: str = typer.Option("", "--namespace", "-n", help="Namespace for this vault's graph (for multi-graph federation)"),
     skip_cluster: bool = typer.Option(False, "--skip-cluster"),
     skip_report: bool = typer.Option(False, "--skip-report"),
     skip_embed: bool = typer.Option(False, "--skip-embed", help="Skip Pass 3 embedding + similarity edges"),
@@ -58,6 +59,13 @@ def ingest(
 
     Pipeline: Pass 1 (AST) → Pass 3 (Embedding) → Pass 4 (Leiden) → Pass 5 (Persist + Report)
     """
+    if namespace and output is not None:
+        output = output / namespace
+    elif namespace:
+        # Apply namespace subdirectory to the default output path
+        settings_tmp = PrismRagSettings()
+        output = settings_tmp.data_dir / namespace
+
     settings = _resolve_settings(vault, output)
 
     typer.secho(f"📂 Vault:  {settings.vault_path}", fg=typer.colors.CYAN)
@@ -174,39 +182,53 @@ def add(
 def query(
     q: str = typer.Argument(..., help="Query string (node label, topic, or keyword)"),
     graph_path: Path = typer.Option(None, "--graph", "-g", help="Path to graph.json"),
+    scope: str = typer.Option("", "--scope", "-s", help="Namespace to search (empty = all)"),
     budget: int = typer.Option(4000, "--budget", "-b", help="Token budget"),
     mode: str = typer.Option("bfs", "--mode", "-m", help="Traversal mode: bfs or dfs"),
     show_content: bool = typer.Option(False, "--content", "-c", help="Show node content"),
 ) -> None:
     """Query the knowledge graph via BFS/DFS traversal."""
-    from prism_rag.retrieve.bfs import bfs_traverse
-    from prism_rag.retrieve.dfs import dfs_traverse
-    from prism_rag.retrieve.entry import resolve_entry_point
+    from prism_rag.retrieve.bfs import federated_bfs
+    from prism_rag.retrieve.dfs import federated_dfs
+    from prism_rag.retrieve.entry import resolve_entry_points
+    from prism_rag.store.federated import FederatedGraph
 
     settings = PrismRagSettings()
-    path = graph_path or settings.graph_path
 
-    if not path.exists():
-        typer.secho(f"❌ Graph not found: {path}", fg=typer.colors.RED, err=True)
-        typer.secho("   Run 'prism-rag ingest' first.", err=True)
+    # Use federated layer (transparent in single-graph mode)
+    resolved = settings.resolved_graphs
+
+    # If --graph is specified, override with a single-graph source
+    if graph_path is not None:
+        if not graph_path.exists():
+            typer.secho(f"❌ Graph not found: {graph_path}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+        from prism_rag.config import GraphSource
+        resolved = [GraphSource(namespace="default", vault_path=settings.vault_path, data_dir=graph_path.parent)]
+
+    fg = FederatedGraph.load(resolved)
+
+    if fg.node_count == 0:
+        typer.secho("❌ No graphs loaded. Run 'prism-rag ingest' first.", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
 
-    graph = KnowledgeGraph.load(path)
-
-    # Resolve entry point
-    entry = resolve_entry_point(graph, q)
-    if entry is None:
+    # Resolve entry points (federated)
+    entries = resolve_entry_points(fg, q, scope=scope if scope else None)
+    if not entries:
         typer.secho(f"❌ No matching node for query: {q!r}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
 
-    entry_label = graph.g.nodes[entry].get("label", entry)
-    typer.secho(f"🎯 Entry: {entry_label} ({entry})", fg=typer.colors.CYAN)
+    # Use the first (best) entry point
+    entry_ns, entry_id = entries[0]
+    entry_graph = fg.get_graph(entry_ns)
+    entry_label = entry_graph.g.nodes[entry_id].get("label", entry_id) if entry_graph else entry_id
+    typer.secho(f"🎯 Entry: {entry_label} ({entry_ns}::{entry_id})", fg=typer.colors.CYAN)
 
-    # Traverse
+    # Traverse within the resolved namespace
     if mode == "dfs":
-        nodes = dfs_traverse(graph, entry, budget=budget)
+        nodes = federated_dfs(fg, entry_ns, entry_id, budget=budget)
     else:
-        nodes = bfs_traverse(graph, entry, budget=budget)
+        nodes = federated_bfs(fg, entry_ns, entry_id, budget=budget)
 
     typer.secho(
         f"📊 Traversed {len(nodes)} nodes · ~{sum(n.get('tokens', 0) for n in nodes):,} tokens",
@@ -281,22 +303,23 @@ def serve(
     list_communities, explore_community, and vault write tools.
     """
     from prism_rag.mcp_server.server import run_server
+    from prism_rag.store.federated import FederatedGraph
 
     settings = PrismRagSettings()
+    resolved = settings.resolved_graphs
 
-    if not settings.graph_path.exists():
+    # Verify at least one graph exists before starting
+    fg = FederatedGraph.load(resolved)
+    if fg.node_count == 0:
         typer.secho(
-            f"❌ Graph not found: {settings.graph_path}\n   Run 'prism-rag ingest' first.",
+            "❌ No graphs loaded. Run 'prism-rag ingest' first.",
             fg=typer.colors.RED,
             err=True,
         )
         raise typer.Exit(1)
 
-    # Just load, don't rebuild
-    graph = KnowledgeGraph.load(settings.graph_path)
     typer.secho(
-        f"📊 Loaded graph: {graph.node_count} nodes · {graph.edge_count} edges · "
-        f"{len(graph.communities)} communities",
+        f"📊 Loaded {len(fg.namespaces)} graph(s): {fg.node_count} nodes · {fg.edge_count} edges",
         fg=typer.colors.GREEN,
         err=True,
     )

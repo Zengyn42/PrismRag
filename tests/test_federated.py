@@ -274,3 +274,55 @@ class TestMCPFederatedIntegration:
         fg = mcp_mod._ensure_federated()
         assert isinstance(fg, FederatedGraph)
         assert fg.node_count == 1
+
+
+# ── Task 10: End-to-end integration test ─────────────────────────────────────
+
+
+class TestFederatedE2E:
+    def test_full_pipeline_two_graphs(self, tmp_path):
+        """Create two graphs, federate them, search across both."""
+        g1 = _make_graph(
+            [("session-mgmt", "Session Management"), ("auth", "Authentication"),
+             ("tag:backend", "backend")],
+            [("session-mgmt", "auth", "links_to"),
+             ("session-mgmt", "tag:backend", "tagged_as"),
+             ("auth", "tag:backend", "tagged_as")],
+        )
+        g2 = _make_graph(
+            [("standup-0312", "Standup March 12"), ("retro-0315", "Retro March 15"),
+             ("tag:backend", "backend")],
+            [("standup-0312", "retro-0315", "links_to"),
+             ("standup-0312", "tag:backend", "tagged_as")],
+        )
+
+        d1, d2 = tmp_path / "d1", tmp_path / "d2"
+        d1.mkdir(); d2.mkdir()
+        g1.save(d1 / "graph.json")
+        g2.save(d2 / "graph.json")
+
+        sources = [
+            GraphSource(namespace="tech", vault_path=tmp_path / "v1", data_dir=d1),
+            GraphSource(namespace="meetings", vault_path=tmp_path / "v2", data_dir=d2),
+        ]
+        fg = FederatedGraph.load(sources)
+
+        # Bridge: shared tag:backend
+        assert len(fg.bridges) >= 1
+
+        # Search in tech namespace
+        results = resolve_entry_points(fg, "session management", scope="tech")
+        assert len(results) == 1
+        assert results[0] == ("tech", "session-mgmt")
+
+        # Search across all — tag:backend in both
+        results_all = resolve_entry_points(fg, "backend")
+        assert len(results_all) == 2
+
+        # BFS within tech
+        traversed = federated_bfs(fg, "tech", "session-mgmt", budget=1000)
+        assert len(traversed) >= 2
+        assert all(n.get("namespace") == "tech" for n in traversed)
+
+        # Namespaces
+        assert fg.namespaces == ["meetings", "tech"]
