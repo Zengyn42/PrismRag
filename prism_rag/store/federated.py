@@ -111,3 +111,22 @@ class FederatedGraph:
 
         logger.info(f"[federated] built {len(self._bridges)} bridge edges across {len(self._graphs)} graphs")
         return len(self._bridges)
+
+    @classmethod
+    def load(cls, sources: list) -> "FederatedGraph":
+        """Load a FederatedGraph from a list of GraphSource configs.
+        Skips sources whose graph.json doesn't exist (logs warning).
+        Automatically computes bridge edges after loading.
+        """
+        graphs: dict[str, KnowledgeGraph] = {}
+        for src in sources:
+            gpath = src.graph_path
+            if not gpath.exists():
+                logger.warning(f"[federated] graph not found: {gpath} (namespace={src.namespace}), skipping")
+                continue
+            g = KnowledgeGraph.load(gpath)
+            graphs[src.namespace] = g
+            logger.info(f"[federated] loaded {src.namespace}: {g.node_count} nodes, {g.edge_count} edges")
+        fg = cls(graphs)
+        fg.build_bridges()
+        return fg

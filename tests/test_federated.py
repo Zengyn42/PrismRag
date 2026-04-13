@@ -141,3 +141,114 @@ class TestBridgeEdges:
         fg = FederatedGraph({"ns1": g1, "ns2": g2})
         fg.build_bridges()
         assert len(fg.bridges) >= 2
+
+
+# ── Task 4: Federated entry point resolution ──────────────────────────────────
+
+from prism_rag.retrieve.entry import resolve_entry_points
+
+
+class TestFederatedEntryResolution:
+    def test_single_graph_bare_query(self):
+        g = _make_graph([("session-mgmt", "Session Management")])
+        fg = FederatedGraph({"nimbus": g})
+        results = resolve_entry_points(fg, "session management")
+        assert len(results) == 1
+        assert results[0] == ("nimbus", "session-mgmt")
+
+    def test_multi_graph_finds_in_all(self):
+        g1 = _make_graph([("arch", "Architecture")])
+        g2 = _make_graph([("arch-review", "Architecture Review")])
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        results = resolve_entry_points(fg, "architecture")
+        assert len(results) == 2
+
+    def test_scoped_query(self):
+        g1 = _make_graph([("a", "Design")])
+        g2 = _make_graph([("b", "Design Doc")])
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        results = resolve_entry_points(fg, "design", scope="ns1")
+        assert len(results) == 1
+        assert results[0][0] == "ns1"
+
+    def test_qualified_id_query(self):
+        g1 = _make_graph([("a", "A")])
+        fg = FederatedGraph({"nimbus": g1})
+        results = resolve_entry_points(fg, "nimbus::a")
+        assert len(results) == 1
+        assert results[0] == ("nimbus", "a")
+
+
+# ── Task 5: Federated BFS/DFS traversal ──────────────────────────────────────
+
+from prism_rag.retrieve.bfs import federated_bfs
+from prism_rag.retrieve.dfs import federated_dfs
+
+
+class TestFederatedTraversal:
+    def test_bfs_single_graph(self):
+        g = _make_graph([("a", "A"), ("b", "B")], [("a", "b", "links_to")])
+        fg = FederatedGraph({"ns1": g})
+        results = federated_bfs(fg, "ns1", "a", budget=1000)
+        ids = [r["id"] for r in results]
+        assert "a" in ids
+        assert "b" in ids
+
+    def test_bfs_tags_namespace(self):
+        g = _make_graph([("a", "A"), ("b", "B")], [("a", "b", "links_to")])
+        fg = FederatedGraph({"ns1": g})
+        results = federated_bfs(fg, "ns1", "a", budget=1000)
+        assert all(n.get("namespace") == "ns1" for n in results)
+
+    def test_dfs_single_graph(self):
+        g = _make_graph(
+            [("a", "A"), ("b", "B"), ("c", "C")],
+            [("a", "b", "links_to"), ("b", "c", "links_to")],
+        )
+        fg = FederatedGraph({"ns1": g})
+        results = federated_dfs(fg, "ns1", "a", budget=1000)
+        ids = [r["id"] for r in results]
+        assert ids == ["a", "b", "c"]
+
+    def test_nonexistent_namespace_returns_empty(self):
+        g = _make_graph([("a", "A")])
+        fg = FederatedGraph({"ns1": g})
+        assert federated_bfs(fg, "nope", "a") == []
+        assert federated_dfs(fg, "nope", "a") == []
+
+
+# ── Task 6: FederatedGraph.load() from config ─────────────────────────────────
+
+
+class TestFederatedLoader:
+    def test_load_from_graph_sources(self, tmp_path):
+        g1 = _make_graph([("a", "A")], [])
+        g2 = _make_graph([("x", "X"), ("y", "Y")], [("x", "y", "links_to")])
+        d1 = tmp_path / "data" / "ns1"
+        d2 = tmp_path / "data" / "ns2"
+        d1.mkdir(parents=True)
+        d2.mkdir(parents=True)
+        g1.save(d1 / "graph.json")
+        g2.save(d2 / "graph.json")
+
+        sources = [
+            GraphSource(namespace="ns1", vault_path=tmp_path / "v1", data_dir=d1),
+            GraphSource(namespace="ns2", vault_path=tmp_path / "v2", data_dir=d2),
+        ]
+        fg = FederatedGraph.load(sources)
+        assert fg.node_count == 3
+        assert fg.namespaces == ["ns1", "ns2"]
+
+    def test_load_skips_missing_graph(self, tmp_path):
+        g1 = _make_graph([("a", "A")])
+        d1 = tmp_path / "data" / "ns1"
+        d1.mkdir(parents=True)
+        g1.save(d1 / "graph.json")
+
+        sources = [
+            GraphSource(namespace="ns1", vault_path=tmp_path / "v1", data_dir=d1),
+            GraphSource(namespace="missing", vault_path=tmp_path / "v2", data_dir=tmp_path / "nope"),
+        ]
+        fg = FederatedGraph.load(sources)
+        assert fg.node_count == 1
+        assert fg.namespaces == ["ns1"]

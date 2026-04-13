@@ -12,8 +12,12 @@ Returns the best-matching node ID, or None if no match.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from prism_rag.store.graph import KnowledgeGraph
+
+if TYPE_CHECKING:
+    from prism_rag.store.federated import FederatedGraph
 
 logger = logging.getLogger(__name__)
 
@@ -78,3 +82,46 @@ def resolve_entry_point(
 
     logger.debug(f"[entry] no match for query={query!r}")
     return None
+
+
+def resolve_entry_points(
+    federated: "FederatedGraph",
+    query: str,
+    scope: str | None = None,
+) -> list[tuple[str, str]]:
+    """Resolve entry points across a federated graph.
+
+    Supports:
+    - "namespace::node_id" qualified addressing
+    - scope="namespace" to search only one graph
+    - bare query searches all graphs
+
+    Returns: List of (namespace, node_id) tuples.
+    """
+    # Handle qualified ID
+    if "::" in query:
+        ns, _, node_id = query.partition("::")
+        graph = federated.get_graph(ns)
+        if graph and node_id in graph.g:
+            return [(ns, node_id)]
+        if graph:
+            match = resolve_entry_point(graph, node_id)
+            if match:
+                return [(ns, match)]
+        return []
+
+    # Determine which namespaces to search
+    if scope:
+        search_ns = [scope] if federated.get_graph(scope) else []
+    else:
+        search_ns = federated.namespaces
+
+    results: list[tuple[str, str]] = []
+    for ns in search_ns:
+        graph = federated.get_graph(ns)
+        if graph is None:
+            continue
+        match = resolve_entry_point(graph, query)
+        if match:
+            results.append((ns, match))
+    return results

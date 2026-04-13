@@ -10,8 +10,12 @@ This is the DEFAULT query mode — broad context collection.
 from __future__ import annotations
 
 from collections import deque
+from typing import TYPE_CHECKING
 
 from prism_rag.store.graph import KnowledgeGraph
+
+if TYPE_CHECKING:
+    from prism_rag.store.federated import FederatedGraph
 
 
 def bfs_traverse(
@@ -84,3 +88,22 @@ def bfs_traverse(
             queue.append((neighbor_id, depth + 1))
 
     return result
+
+
+def federated_bfs(
+    federated: "FederatedGraph",
+    namespace: str,
+    entry_id: str,
+    budget: int = 4000,
+    max_depth: int = 10,
+) -> list[dict]:
+    """BFS traversal starting from a node in a specific namespace.
+    Results include a "namespace" key on each node dict.
+    """
+    graph = federated.get_graph(namespace)
+    if graph is None:
+        return []
+    nodes = bfs_traverse(graph, entry_id, budget=budget, max_depth=max_depth)
+    for n in nodes:
+        n["namespace"] = namespace
+    return nodes

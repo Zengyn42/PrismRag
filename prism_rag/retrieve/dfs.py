@@ -8,7 +8,12 @@ Neighbors are explored in order of edge weight (highest first).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from prism_rag.store.graph import KnowledgeGraph
+
+if TYPE_CHECKING:
+    from prism_rag.store.federated import FederatedGraph
 
 
 def dfs_traverse(
@@ -72,3 +77,22 @@ def dfs_traverse(
 
     _dfs(entry_id, 0)
     return result
+
+
+def federated_dfs(
+    federated: "FederatedGraph",
+    namespace: str,
+    entry_id: str,
+    budget: int = 4000,
+    max_depth: int = 10,
+) -> list[dict]:
+    """DFS traversal starting from a node in a specific namespace.
+    Results include a "namespace" key on each node dict.
+    """
+    graph = federated.get_graph(namespace)
+    if graph is None:
+        return []
+    nodes = dfs_traverse(graph, entry_id, budget=budget, max_depth=max_depth)
+    for n in nodes:
+        n["namespace"] = namespace
+    return nodes
