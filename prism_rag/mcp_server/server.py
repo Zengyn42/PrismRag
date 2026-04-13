@@ -374,6 +374,129 @@ def explore_community(community: str) -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+# ── Tool 6: write_note ───────────────────────────────────────────────
+
+
+@mcp.tool()
+def write_note(path: str, content: str, cas_hash: str = "") -> str:
+    """Write a note to the vault (create or overwrite).
+
+    After writing, the knowledge graph is automatically updated.
+
+    Args:
+        path: Relative path within the vault (e.g., "设计细节/new_doc.md")
+        content: Full markdown content (including frontmatter if desired)
+        cas_hash: Empty string = create new file (fails if exists).
+                  Non-empty = overwrite (fails if hash doesn't match).
+                  Get cas_hash from read_note first.
+
+    Returns:
+        JSON with new cas_hash and graph update stats.
+    """
+    from prism_rag.vault_ops.cas import compute_hash, get_file_lock, verify_cas
+    from prism_rag.vault_ops.errors import VaultErrorCode, fail, ok
+    from prism_rag.vault_ops.vault import Vault
+    from prism_rag.ingest.incremental import ingest_file
+
+    settings = PrismRagSettings()
+    vault = Vault(settings.vault_path)
+
+    resolved = vault.resolve_path(path)
+    if isinstance(resolved, dict):
+        return json.dumps(resolved, ensure_ascii=False)
+
+    import asyncio
+    lock = get_file_lock(resolved)
+
+    # Sync write (MCP tools are sync in FastMCP)
+    expected = cas_hash if cas_hash else None
+    is_valid, actual = verify_cas(resolved, expected)
+
+    if not is_valid:
+        if expected is None:
+            return json.dumps(fail(
+                VaultErrorCode.ALREADY_EXISTS,
+                f"文件已存在: {path}。先用 read_note 获取 cas_hash。",
+                actual_hash=actual,
+            ), ensure_ascii=False)
+        return json.dumps(fail(
+            VaultErrorCode.CONFLICT,
+            f"CAS 冲突: 文件已被修改。",
+            expected_hash=expected, actual_hash=actual,
+        ), ensure_ascii=False)
+
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(content, encoding="utf-8")
+    new_hash = compute_hash(content)
+
+    # Incrementally update graph
+    graph_stats = {}
+    try:
+        graph_stats = ingest_file(
+            resolved, settings=settings, skip_embed=True, skip_persist=False,
+        )
+        # Reload the updated graph into memory
+        global _graph
+        _graph = KnowledgeGraph.load(settings.graph_path)
+    except Exception as e:
+        logger.warning(f"[write_note] graph update failed: {e}")
+        graph_stats = {"error": str(e)}
+
+    result = {
+        "status": "ok",
+        "data": {"cas_hash": new_hash, "path": path},
+        "graph_update": graph_stats,
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+# ── Tool 7: read_note ────────────────────────────────────────────────
+
+
+@mcp.tool()
+def read_note(path: str) -> str:
+    """Read a note's content and cas_hash (needed before writing).
+
+    Args:
+        path: Relative path within the vault (e.g., "设计细节/some_doc.md")
+
+    Returns:
+        JSON with content, frontmatter, and cas_hash.
+    """
+    from prism_rag.vault_ops.cas import compute_hash
+    from prism_rag.vault_ops.errors import VaultErrorCode, fail, ok
+    from prism_rag.vault_ops.vault import Vault
+
+    settings = PrismRagSettings()
+    vault = Vault(settings.vault_path)
+
+    resolved = vault.resolve_path(path)
+    if isinstance(resolved, dict):
+        return json.dumps(resolved, ensure_ascii=False)
+
+    if not resolved.exists():
+        return json.dumps(fail(VaultErrorCode.NOT_FOUND, f"文件不存在: {path}"), ensure_ascii=False)
+
+    content = resolved.read_text(encoding="utf-8")
+    cas = compute_hash(content)
+
+    # Parse frontmatter if present
+    try:
+        import frontmatter
+        post = frontmatter.loads(content)
+        fm = dict(post.metadata or {})
+    except Exception:
+        fm = {}
+
+    result = ok(data={
+        "path": path,
+        "content": content,
+        "cas_hash": cas,
+        "frontmatter": fm,
+    })
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 # ── Server startup ───────────────────────────────────────────────────
 
 
