@@ -9,14 +9,30 @@ Example:
     export PRISM_PRIVACY_TIER=paid
 """
 
+from __future__ import annotations
+
+import json
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 PrivacyTier = Literal["paid", "free"]
+
+
+class GraphSource(BaseModel):
+    """Configuration for a single graph source (vault + data directory pair)."""
+
+    namespace: str
+    vault_path: Path
+    data_dir: Path
+    writable: bool = False
+
+    @property
+    def graph_path(self) -> Path:
+        return self.data_dir / "graph.json"
 
 
 class PrismRagSettings(BaseSettings):
@@ -80,6 +96,25 @@ class PrismRagSettings(BaseSettings):
         description="Default token budget for query-time graph traversal",
     )
 
+    # ── Multi-graph / federation ──────────────────────────────────────
+    graphs: list[GraphSource] | None = Field(
+        default=None,
+        description="Multi-graph sources (overrides vault_path/data_dir when set). "
+                    "Set via PRISM_GRAPHS as a JSON array.",
+    )
+    multi_graph_mode: str = Field(
+        default="federated",
+        description="Federation strategy. Only 'federated' is implemented.",
+    )
+
+    @field_validator("graphs", mode="before")
+    @classmethod
+    def _parse_graphs_json(cls, v):
+        if isinstance(v, str):
+            parsed = json.loads(v)
+            return [GraphSource(**item) for item in parsed]
+        return v
+
     @field_validator("vault_path", "data_dir", mode="before")
     @classmethod
     def _expand_user(cls, v):
@@ -105,3 +140,21 @@ class PrismRagSettings(BaseSettings):
     @property
     def embedding_cache_path(self) -> Path:
         return self.data_dir / "lance"
+
+    @property
+    def resolved_graphs(self) -> list[GraphSource]:
+        """Return the list of graph sources to load.
+
+        If ``graphs`` is explicitly configured, return it directly.
+        Otherwise synthesize a single GraphSource from the legacy
+        ``vault_path`` / ``data_dir`` pair with namespace ``"default"``.
+        """
+        if self.graphs is not None:
+            return self.graphs
+        return [
+            GraphSource(
+                namespace="default",
+                vault_path=self.vault_path,
+                data_dir=self.data_dir,
+            )
+        ]
