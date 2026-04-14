@@ -81,6 +81,25 @@ def _node_summary(graph: KnowledgeGraph, node_id: str, include_content: bool = F
     return summary
 
 
+def _federated_node_summary(fg: FederatedGraph, qualified_id: str) -> dict:
+    """Build node summary from a qualified ID (namespace::node_id) in federated graph."""
+    if "::" in qualified_id:
+        ns, _, bare_id = qualified_id.partition("::")
+    elif fg.is_single:
+        ns = fg.namespaces[0]
+        bare_id = qualified_id
+    else:
+        ns, bare_id = "", qualified_id
+
+    graph = fg.get_graph(ns)
+    if graph is None:
+        return {"id": bare_id, "namespace": ns, "label": bare_id, "kind": "?"}
+
+    summary = _node_summary(graph, bare_id)
+    summary["namespace"] = ns
+    return summary
+
+
 # -- Tool 1: search_knowledge ------------------------------------------------
 
 
@@ -114,9 +133,9 @@ def search_knowledge(
     graph = fg.get_graph(ns)
 
     if mode == "dfs":
-        nodes = federated_dfs(fg, ns, entry_id, budget=budget)
+        nodes = federated_dfs(fg, ns, entry_id, budget=budget, scope=scope or None)
     else:
-        nodes = federated_bfs(fg, ns, entry_id, budget=budget)
+        nodes = federated_bfs(fg, ns, entry_id, budget=budget, scope=scope or None)
 
     result = {
         "entry_point": _node_summary(graph, entry_id),
@@ -215,9 +234,11 @@ def explain_node(node: str, scope: str = "") -> str:
 def trace_path(from_node: str, to_node: str, max_length: int = 5) -> str:
     """Find the shortest path between two nodes in the knowledge graph.
 
+    Supports cross-namespace paths via bridge edges.
+
     Args:
-        from_node: Starting node (ID, label, or partial name)
-        to_node: Ending node (ID, label, or partial name)
+        from_node: Starting node (ID, label, partial name, or namespace::node_id)
+        to_node: Ending node (ID, label, partial name, or namespace::node_id)
         max_length: Maximum path length to search (default 5)
 
     Returns:
@@ -235,45 +256,40 @@ def trace_path(from_node: str, to_node: str, max_length: int = 5) -> str:
     src_ns, src_id = src_entries[0]
     tgt_ns, tgt_id = tgt_entries[0]
 
-    if src_ns != tgt_ns:
-        return json.dumps({
-            "error": "Cross-namespace trace not yet supported",
-            "from_namespace": src_ns,
-            "to_namespace": tgt_ns,
-        }, ensure_ascii=False)
+    if fg.is_single:
+        # Single-graph: use original graph directly (no prefixing)
+        graph = fg.get_graph(src_ns)
+        undirected = graph.g.to_undirected()
+        src_qid, tgt_qid = src_id, tgt_id
+    else:
+        # Multi-graph: use unified view
+        undirected = fg.unified_view.to_undirected()
+        src_qid = f"{src_ns}::{src_id}"
+        tgt_qid = f"{tgt_ns}::{tgt_id}"
 
-    graph = fg.get_graph(src_ns)
-
-    # Use undirected view for pathfinding (wikilinks are directional but we want reachability)
-    undirected = graph.g.to_undirected()
     try:
-        path = nx.shortest_path(undirected, source=src_id, target=tgt_id)
+        path = nx.shortest_path(undirected, source=src_qid, target=tgt_qid)
     except nx.NetworkXNoPath:
         return json.dumps({
             "error": "No path found",
-            "from": _node_summary(graph, src_id),
-            "to": _node_summary(graph, tgt_id),
+            "from": _federated_node_summary(fg, f"{src_ns}::{src_id}"),
+            "to": _federated_node_summary(fg, f"{tgt_ns}::{tgt_id}"),
         }, ensure_ascii=False)
 
     if len(path) - 1 > max_length:
         return json.dumps({
             "error": f"Shortest path has {len(path)-1} hops (max_length={max_length})",
-            "from": _node_summary(graph, src_id),
-            "to": _node_summary(graph, tgt_id),
+            "from": _federated_node_summary(fg, f"{src_ns}::{src_id}"),
+            "to": _federated_node_summary(fg, f"{tgt_ns}::{tgt_id}"),
         }, ensure_ascii=False)
 
-    # Build path description
+    # Build path steps
     steps = []
-    for i, node_id in enumerate(path):
-        step = _node_summary(graph, node_id)
+    for i, qid in enumerate(path):
+        step = _federated_node_summary(fg, qid if "::" in qid else f"{src_ns}::{qid}")
         if i < len(path) - 1:
-            next_id = path[i + 1]
-            if graph.g.has_edge(node_id, next_id):
-                edge_data = graph.g.edges[node_id, next_id]
-            elif graph.g.has_edge(next_id, node_id):
-                edge_data = graph.g.edges[next_id, node_id]
-            else:
-                edge_data = {}
+            next_qid = path[i + 1]
+            edge_data = undirected.edges.get((qid, next_qid), {})
             step["edge_to_next"] = {
                 "relation": edge_data.get("relation", "?"),
                 "confidence": edge_data.get("confidence", "?"),
@@ -283,7 +299,6 @@ def trace_path(from_node: str, to_node: str, max_length: int = 5) -> str:
 
     result = {
         "path_length": len(path) - 1,
-        "namespace": src_ns,
         "steps": steps,
     }
     return json.dumps(result, ensure_ascii=False, indent=2)

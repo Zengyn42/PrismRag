@@ -354,6 +354,64 @@ class TestCrossNamespaceDFS:
         assert all(r["namespace"] == "ns1" for r in results)
 
 
+# ── Task 4: Cross-namespace trace_path ──────────────────────────────────────
+
+
+class TestCrossNamespaceTracePath:
+    def _make_bridged_fg(self):
+        g1 = _make_graph(
+            [("a", "A"), ("tag:python", "python")],
+            [("a", "tag:python", "tagged_as")],
+        )
+        g2 = _make_graph(
+            [("x", "X"), ("tag:python", "python")],
+            [("x", "tag:python", "tagged_as")],
+        )
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        fg.build_bridges()
+        return fg
+
+    def test_cross_namespace_path_found(self):
+        """trace_path should find a path from ns1::a to ns2::x via shared tag bridge."""
+        import json
+        from prism_rag.mcp_server import server as mcp_mod
+        fg = self._make_bridged_fg()
+        mcp_mod._federated = fg
+        result = json.loads(mcp_mod.trace_path("ns1::a", "ns2::x", max_length=10))
+        assert "error" not in result
+        assert result["path_length"] >= 1
+        step_namespaces = {s["namespace"] for s in result["steps"]}
+        assert "ns1" in step_namespaces
+        assert "ns2" in step_namespaces
+
+    def test_cross_namespace_no_path(self):
+        """Two graphs with no shared tags → no path."""
+        import json
+        from prism_rag.mcp_server import server as mcp_mod
+        g1 = _make_graph([("a", "A")], [])
+        g2 = _make_graph([("x", "X")], [])
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        fg.build_bridges()
+        mcp_mod._federated = fg
+        result = json.loads(mcp_mod.trace_path("ns1::a", "ns2::x"))
+        assert "error" in result
+        assert result["error"] == "No path found"
+
+    def test_same_namespace_still_works(self):
+        """Same-namespace trace_path still works as before."""
+        import json
+        from prism_rag.mcp_server import server as mcp_mod
+        g = _make_graph(
+            [("a", "A"), ("b", "B")],
+            [("a", "b", "links_to")],
+        )
+        fg = FederatedGraph({"ns1": g})
+        mcp_mod._federated = fg
+        result = json.loads(mcp_mod.trace_path("a", "b"))
+        assert "error" not in result
+        assert result["path_length"] == 1
+
+
 # ── Task 6: FederatedGraph.load() from config ─────────────────────────────────
 
 
@@ -463,3 +521,45 @@ class TestFederatedE2E:
 
         # Namespaces
         assert fg.namespaces == ["meetings", "tech"]
+
+
+class TestCrossNamespaceE2E:
+    def test_full_cross_namespace_pipeline(self, tmp_path):
+        """End-to-end: two graphs -> federate -> BFS crosses bridge -> trace_path crosses bridge."""
+        import json
+        from prism_rag.mcp_server import server as mcp_mod
+
+        g1 = _make_graph(
+            [("session-mgmt", "Session Management"), ("auth", "Authentication"),
+             ("tag:backend", "backend")],
+            [("session-mgmt", "auth", "links_to"),
+             ("session-mgmt", "tag:backend", "tagged_as"),
+             ("auth", "tag:backend", "tagged_as")],
+        )
+        g2 = _make_graph(
+            [("standup-0312", "Standup March 12"), ("retro-0315", "Retro March 15"),
+             ("tag:backend", "backend")],
+            [("standup-0312", "retro-0315", "links_to"),
+             ("standup-0312", "tag:backend", "tagged_as")],
+        )
+
+        fg = FederatedGraph({"tech": g1, "meetings": g2})
+        fg.build_bridges()
+        assert len(fg.bridges) >= 1
+
+        # BFS from tech::session-mgmt should reach meetings via tag:backend
+        results = federated_bfs(fg, "tech", "session-mgmt", budget=5000)
+        namespaces = {r["namespace"] for r in results}
+        assert "tech" in namespaces
+        assert "meetings" in namespaces, "BFS should cross bridge to meetings namespace"
+
+        # trace_path from tech::session-mgmt to meetings::standup-0312
+        mcp_mod._federated = fg
+        path_result = json.loads(mcp_mod.trace_path(
+            "tech::session-mgmt", "meetings::standup-0312", max_length=10
+        ))
+        assert "error" not in path_result, f"trace_path failed: {path_result}"
+        assert path_result["path_length"] >= 1
+        step_ns = {s["namespace"] for s in path_result["steps"]}
+        assert "tech" in step_ns
+        assert "meetings" in step_ns
