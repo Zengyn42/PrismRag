@@ -85,14 +85,75 @@ def federated_dfs(
     entry_id: str,
     budget: int = 4000,
     max_depth: int = 10,
+    scope: str = "",
 ) -> list[dict]:
-    """DFS traversal starting from a node in a specific namespace.
-    Results include a "namespace" key on each node dict.
+    """DFS traversal starting from a node, crossing bridge edges.
+
+    In single-graph mode, delegates to dfs_traverse() for zero overhead.
+    In multi-graph mode, operates on the unified_view.
+
+    Args:
+        scope: If non-empty, restrict traversal to this namespace only.
     """
-    graph = federated.get_graph(namespace)
-    if graph is None:
+    if federated.is_single:
+        graph = federated.get_graph(namespace)
+        if graph is None:
+            return []
+        nodes = dfs_traverse(graph, entry_id, budget=budget, max_depth=max_depth)
+        for n in nodes:
+            n["namespace"] = namespace
+        return nodes
+
+    # Multi-graph: use unified_view
+    uv = federated.unified_view
+    entry_qid = f"{namespace}::{entry_id}"
+    if entry_qid not in uv:
         return []
-    nodes = dfs_traverse(graph, entry_id, budget=budget, max_depth=max_depth)
-    for n in nodes:
-        n["namespace"] = namespace
-    return nodes
+
+    visited: set[str] = set()
+    result: list[dict] = []
+    accumulated_tokens = 0
+
+    def _dfs(qid: str, depth: int) -> None:
+        nonlocal accumulated_tokens
+
+        if qid in visited or depth > max_depth:
+            return
+
+        node_data = uv.nodes[qid]
+        node_ns = node_data.get("namespace", namespace)
+
+        if scope and node_ns != scope:
+            return
+
+        node_tokens = node_data.get("tokens", 0)
+        if result and accumulated_tokens + node_tokens > budget:
+            return
+
+        visited.add(qid)
+        accumulated_tokens += node_tokens
+
+        bare_id = qid.split("::", 1)[1] if "::" in qid else qid
+        result.append({"id": bare_id, "namespace": node_ns, **{
+            k: v for k, v in node_data.items() if k != "namespace"
+        }})
+
+        if accumulated_tokens >= budget:
+            return
+
+        neighbors: list[tuple[str, float]] = []
+        for nbr in uv.neighbors(qid):
+            if nbr not in visited:
+                w = float(uv.edges[qid, nbr].get("weight", 1.0))
+                neighbors.append((nbr, w))
+        for pred in uv.predecessors(qid):
+            if pred not in visited:
+                w = float(uv.edges[pred, qid].get("weight", 1.0))
+                neighbors.append((pred, w))
+
+        neighbors.sort(key=lambda p: p[1], reverse=True)
+        for nbr, _ in neighbors:
+            _dfs(nbr, depth + 1)
+
+    _dfs(entry_qid, 0)
+    return result

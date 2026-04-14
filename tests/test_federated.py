@@ -277,6 +277,83 @@ class TestFederatedTraversal:
         assert federated_dfs(fg, "nope", "a") == []
 
 
+class TestCrossNamespaceBFS:
+    def _make_bridged_fg(self):
+        """Two graphs connected via shared tag:python."""
+        g1 = _make_graph(
+            [("a", "A"), ("tag:python", "python")],
+            [("a", "tag:python", "tagged_as")],
+        )
+        g2 = _make_graph(
+            [("x", "X"), ("tag:python", "python")],
+            [("x", "tag:python", "tagged_as")],
+        )
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        fg.build_bridges()
+        return fg
+
+    def test_bfs_crosses_bridge(self):
+        fg = self._make_bridged_fg()
+        results = federated_bfs(fg, "ns1", "a", budget=5000)
+        namespaces = {r["namespace"] for r in results}
+        assert "ns1" in namespaces
+        assert "ns2" in namespaces
+
+    def test_bfs_scope_prevents_crossing(self):
+        fg = self._make_bridged_fg()
+        results = federated_bfs(fg, "ns1", "a", budget=5000, scope="ns1")
+        namespaces = {r["namespace"] for r in results}
+        assert namespaces == {"ns1"}
+
+    def test_bfs_single_graph_unchanged(self):
+        g = _make_graph([("a", "A"), ("b", "B")], [("a", "b", "links_to")])
+        fg = FederatedGraph({"ns1": g})
+        results = federated_bfs(fg, "ns1", "a", budget=1000)
+        ids = [r["id"] for r in results]
+        assert "a" in ids
+        assert "b" in ids
+        assert all(r["namespace"] == "ns1" for r in results)
+
+
+class TestCrossNamespaceDFS:
+    def _make_bridged_fg(self):
+        g1 = _make_graph(
+            [("a", "A"), ("tag:python", "python")],
+            [("a", "tag:python", "tagged_as")],
+        )
+        g2 = _make_graph(
+            [("x", "X"), ("tag:python", "python")],
+            [("x", "tag:python", "tagged_as")],
+        )
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        fg.build_bridges()
+        return fg
+
+    def test_dfs_crosses_bridge(self):
+        fg = self._make_bridged_fg()
+        results = federated_dfs(fg, "ns1", "a", budget=5000)
+        namespaces = {r["namespace"] for r in results}
+        assert "ns1" in namespaces
+        assert "ns2" in namespaces
+
+    def test_dfs_scope_prevents_crossing(self):
+        fg = self._make_bridged_fg()
+        results = federated_dfs(fg, "ns1", "a", budget=5000, scope="ns1")
+        namespaces = {r["namespace"] for r in results}
+        assert namespaces == {"ns1"}
+
+    def test_dfs_single_graph_unchanged(self):
+        g = _make_graph(
+            [("a", "A"), ("b", "B"), ("c", "C")],
+            [("a", "b", "links_to"), ("b", "c", "links_to")],
+        )
+        fg = FederatedGraph({"ns1": g})
+        results = federated_dfs(fg, "ns1", "a", budget=1000)
+        ids = [r["id"] for r in results]
+        assert ids == ["a", "b", "c"]
+        assert all(r["namespace"] == "ns1" for r in results)
+
+
 # ── Task 6: FederatedGraph.load() from config ─────────────────────────────────
 
 
@@ -379,8 +456,8 @@ class TestFederatedE2E:
         results_all = resolve_entry_points(fg, "backend")
         assert len(results_all) == 2
 
-        # BFS within tech
-        traversed = federated_bfs(fg, "tech", "session-mgmt", budget=1000)
+        # BFS within tech (scoped to tech namespace only)
+        traversed = federated_bfs(fg, "tech", "session-mgmt", budget=1000, scope="tech")
         assert len(traversed) >= 2
         assert all(n.get("namespace") == "tech" for n in traversed)
 
