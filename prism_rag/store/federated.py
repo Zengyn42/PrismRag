@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import networkx as nx
+
 from prism_rag.store.graph import KnowledgeGraph
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,7 @@ class FederatedGraph:
         self._graphs: dict[str, KnowledgeGraph] = dict(graphs)
         self._single = len(self._graphs) == 1
         self._bridges: list[dict] = []
+        self._unified: nx.DiGraph | None = None
 
     @property
     def namespaces(self) -> list[str]:
@@ -59,6 +62,41 @@ class FederatedGraph:
             return None
         return dict(graph.g.nodes[node_id])
 
+    @property
+    def unified_view(self) -> nx.DiGraph:
+        """Lazy-built unified graph with namespace-prefixed node IDs + bridge edges.
+        Single-graph mode returns the original graph directly (zero-copy).
+        """
+        if self._single:
+            return next(iter(self._graphs.values())).g
+
+        if self._unified is not None:
+            return self._unified
+
+        unified = nx.DiGraph()
+
+        for ns, kg in self._graphs.items():
+            for node_id, data in kg.g.nodes(data=True):
+                qid = f"{ns}::{node_id}"
+                unified.add_node(qid, **data, namespace=ns)
+            for src, tgt, data in kg.g.edges(data=True):
+                unified.add_edge(f"{ns}::{src}", f"{ns}::{tgt}", **data)
+
+        for bridge in self._bridges:
+            src_qid = f"{bridge['source_ns']}::{bridge['source_id']}"
+            tgt_qid = f"{bridge['target_ns']}::{bridge['target_id']}"
+            unified.add_edge(src_qid, tgt_qid,
+                             relation=bridge["relation"],
+                             confidence=bridge["confidence"],
+                             weight=bridge.get("weight", 0.5))
+            unified.add_edge(tgt_qid, src_qid,
+                             relation=bridge["relation"],
+                             confidence=bridge["confidence"],
+                             weight=bridge.get("weight", 0.5))
+
+        self._unified = unified
+        return self._unified
+
     def _parse_id(self, qualified_id: str) -> tuple[str, str]:
         """Parse "namespace::node_id" → (namespace, node_id).
         In single-graph mode, bare IDs map to the only namespace.
@@ -84,6 +122,7 @@ class FederatedGraph:
         Returns: number of bridge edges created.
         """
         self._bridges.clear()
+        self._unified = None
         if self._single:
             return 0
 

@@ -75,6 +75,66 @@ def _make_graph(nodes: list[tuple[str, str]], edges: list[tuple[str, str, str]] 
     return g
 
 
+class TestUnifiedView:
+    def test_single_graph_returns_original(self):
+        """Single-graph mode returns the original nx.DiGraph directly (no prefixing)."""
+        g = _make_graph([("a", "A"), ("b", "B")], [("a", "b", "links_to")])
+        fg = FederatedGraph({"ns1": g})
+        uv = fg.unified_view
+        assert "a" in uv
+        assert "b" in uv
+        assert uv is g.g  # same object, zero-copy
+
+    def test_multi_graph_prefixed_nodes(self):
+        """Multi-graph mode prefixes all node IDs with namespace::."""
+        g1 = _make_graph([("a", "A")])
+        g2 = _make_graph([("x", "X")])
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        uv = fg.unified_view
+        assert "ns1::a" in uv
+        assert "ns2::x" in uv
+        assert "a" not in uv  # bare IDs should not exist
+
+    def test_multi_graph_edges_preserved(self):
+        """Original edges are carried over with prefixed IDs."""
+        g1 = _make_graph([("a", "A"), ("b", "B")], [("a", "b", "links_to")])
+        fg = FederatedGraph({"ns1": g1})
+        fg._single = False  # force multi-graph path for testing
+        uv = fg.unified_view
+        assert uv.has_edge("ns1::a", "ns1::b")
+        edge = uv.edges["ns1::a", "ns1::b"]
+        assert edge["relation"] == "links_to"
+
+    def test_multi_graph_bridge_edges_included(self):
+        """Bridge edges appear as real edges in unified view."""
+        g1 = _make_graph([("tag:py", "python")], [])
+        g2 = _make_graph([("tag:py", "python")], [])
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        fg.build_bridges()
+        uv = fg.unified_view
+        assert uv.has_edge("ns1::tag:py", "ns2::tag:py") or uv.has_edge("ns2::tag:py", "ns1::tag:py")
+
+    def test_node_namespace_attribute(self):
+        """Nodes in unified view carry a 'namespace' attribute."""
+        g1 = _make_graph([("a", "A")])
+        g2 = _make_graph([("x", "X")])
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        uv = fg.unified_view
+        assert uv.nodes["ns1::a"]["namespace"] == "ns1"
+        assert uv.nodes["ns2::x"]["namespace"] == "ns2"
+
+    def test_cache_invalidation_on_rebuild_bridges(self):
+        """build_bridges() invalidates the unified_view cache."""
+        g1 = _make_graph([("tag:py", "python")])
+        g2 = _make_graph([("tag:py", "python")])
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        fg.build_bridges()
+        uv1 = fg.unified_view
+        fg.build_bridges()  # should invalidate
+        uv2 = fg.unified_view
+        assert uv1 is not uv2  # rebuilt
+
+
 class TestFederatedGraphLoad:
     def test_single_graph(self):
         g = _make_graph([("a", "A"), ("b", "B")], [("a", "b", "links_to")])
