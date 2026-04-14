@@ -111,6 +111,12 @@ def ingest(
         n_new = link_similar_nodes(graph, vectors, settings)
         typer.echo(f"   New edges: {n_new} · Total edges: {graph.edge_count}")
 
+        # Persist embeddings to LanceDB for serve-time bridge computation
+        from prism_rag.ingest.embedder import persist_embeddings
+        n_persisted = persist_embeddings(vectors, settings.embedding_cache_path)
+        if n_persisted:
+            typer.echo(f"   Persisted {n_persisted} embeddings to LanceDB")
+
     # ── Pass 4: Leiden clustering ──
     if skip_cluster:
         typer.secho("\n⏭  Pass 4: Leiden clustering (skipped)", fg=typer.colors.YELLOW)

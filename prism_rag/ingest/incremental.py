@@ -170,6 +170,14 @@ def ingest_file(
         _remove_node_and_edges(graph, doc.id)
         logger.info(f"[incremental] removed old version of {doc.id}")
 
+        # Remove old embedding from LanceDB
+        try:
+            from prism_rag.store.embedding_store import EmbeddingStore
+            store = EmbeddingStore(settings.embedding_cache_path)
+            store.delete(doc.id)
+        except Exception:
+            pass  # LanceDB may not exist yet
+
     # Add AST-extracted nodes and edges
     edges_before = graph.edge_count
     _add_single_doc_ast(graph, doc)
@@ -190,25 +198,15 @@ def ingest_file(
         vectors = compute_embeddings(temp_graph, settings)
 
         if vectors:
-            # Also need existing node embeddings for similarity comparison
-            # Re-embed all existing notes (cached in future, for now re-compute)
-            # For MVP: compute similarity only against the new file's vector
-            from prism_rag.ingest.similarity_linker import _cosine_similarity, _find_top_k
-
             new_vec = vectors.get(doc.id)
             if new_vec:
-                # Get all existing note embeddings by re-computing
-                # (TODO: cache embeddings in LanceDB for incremental use)
-                all_nodes_graph = KnowledgeGraph()
-                from prism_rag.ingest.vault_loader import load_vault
-                all_docs = load_vault(vault_root)
-                for d in all_docs:
-                    if d.id != doc.id:
-                        all_nodes_graph.add_node(Node(
-                            id=d.id, label=d.label, kind="note", content=d.content, tokens=0,
-                        ))
-                all_vectors = compute_embeddings(all_nodes_graph, settings)
-                all_vectors[doc.id] = new_vec
+                # Persist new embedding to LanceDB
+                from prism_rag.store.embedding_store import EmbeddingStore
+                store = EmbeddingStore(settings.embedding_cache_path)
+                store.upsert(doc.id, new_vec)
+
+                # Load existing embeddings from LanceDB (cached, no API calls)
+                all_vectors = store.all_embeddings()
 
                 edges_before_sim = graph.edge_count
                 link_similar_nodes(graph, all_vectors, settings)

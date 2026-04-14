@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from google import genai
@@ -132,3 +133,27 @@ def compute_embeddings(
         f"[embedder] done: {len(vectors)}/{total} nodes embedded successfully"
     )
     return vectors
+
+
+def persist_embeddings(
+    vectors: dict[str, list[float]],
+    lance_path: Path,
+) -> int:
+    """Persist computed embeddings to LanceDB.
+
+    Args:
+        vectors: dict mapping node_id → embedding vector.
+        lance_path: Path to LanceDB directory.
+
+    Returns:
+        Number of embeddings persisted.
+    """
+    if not vectors:
+        return 0
+
+    from prism_rag.store.embedding_store import EmbeddingStore
+    store = EmbeddingStore(lance_path)
+    for node_id, vec in vectors.items():
+        store.upsert(node_id, vec)
+    logger.info(f"[embedder] persisted {len(vectors)} embeddings to {lance_path}")
+    return len(vectors)

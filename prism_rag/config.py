@@ -73,6 +73,19 @@ class PrismRagSettings(BaseSettings):
         description="Top-K nearest neighbors per node for similarity edge generation",
     )
 
+    # ── Cross-graph bridge settings ─────────────────────────────────
+    bridge_similarity_threshold: float = Field(
+        default=0.70,
+        ge=0.0,
+        le=1.0,
+        description="Minimum cosine similarity for cross-graph embedding bridges (higher than within-graph to reduce noise)",
+    )
+    bridge_top_k: int = Field(
+        default=5,
+        ge=1,
+        description="Top-K cross-graph neighbors per node for embedding bridge generation",
+    )
+
     # ── Leiden clustering ────────────────────────────────────────────
     leiden_resolution: float = Field(
         default=1.0,
