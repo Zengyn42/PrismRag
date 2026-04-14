@@ -203,6 +203,78 @@ class TestBridgeEdges:
         assert len(fg.bridges) >= 2
 
 
+# ── Embedding bridges ────────────────────────────────────────────────────────
+
+
+class TestEmbeddingBridges:
+    def test_embedding_bridges_created(self, tmp_path):
+        """Two graphs with similar embeddings should get embedding_similar bridges."""
+        from prism_rag.store.embedding_store import EmbeddingStore
+
+        g1 = _make_graph([("a", "A")], [])
+        g2 = _make_graph([("x", "X")], [])
+
+        # Create stores with similar vectors
+        s1 = EmbeddingStore(tmp_path / "lance1")
+        s1.upsert("a", [1.0, 0.0] + [0.0] * 766)
+        s2 = EmbeddingStore(tmp_path / "lance2")
+        s2.upsert("x", [0.95, 0.05] + [0.0] * 766)  # very similar to a
+
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        fg.build_bridges(stores={"ns1": s1, "ns2": s2}, bridge_threshold=0.5, bridge_top_k=5)
+
+        embedding_bridges = [b for b in fg.bridges if b["relation"] == "embedding_similar"]
+        assert len(embedding_bridges) >= 1
+        bridge = embedding_bridges[0]
+        assert {bridge["source_ns"], bridge["target_ns"]} == {"ns1", "ns2"}
+
+    def test_no_embedding_bridges_below_threshold(self, tmp_path):
+        """Dissimilar embeddings should NOT create bridges."""
+        from prism_rag.store.embedding_store import EmbeddingStore
+
+        g1 = _make_graph([("a", "A")], [])
+        g2 = _make_graph([("x", "X")], [])
+
+        s1 = EmbeddingStore(tmp_path / "lance1")
+        s1.upsert("a", [1.0, 0.0] + [0.0] * 766)
+        s2 = EmbeddingStore(tmp_path / "lance2")
+        s2.upsert("x", [0.0, 1.0] + [0.0] * 766)  # orthogonal = similarity ~0
+
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        fg.build_bridges(stores={"ns1": s1, "ns2": s2}, bridge_threshold=0.5, bridge_top_k=5)
+
+        embedding_bridges = [b for b in fg.bridges if b["relation"] == "embedding_similar"]
+        assert len(embedding_bridges) == 0
+
+    def test_no_stores_graceful(self):
+        """No stores provided → only shared-tag bridges, no error."""
+        g1 = _make_graph([("tag:py", "python")], [])
+        g2 = _make_graph([("tag:py", "python")], [])
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        fg.build_bridges()  # no stores arg
+        # Should still have shared-tag bridges
+        assert any(b["relation"] == "shared_tag" for b in fg.bridges)
+
+    def test_embedding_bridges_in_unified_view(self, tmp_path):
+        """Embedding bridges should appear in unified_view."""
+        from prism_rag.store.embedding_store import EmbeddingStore
+
+        g1 = _make_graph([("a", "A")], [])
+        g2 = _make_graph([("x", "X")], [])
+        s1 = EmbeddingStore(tmp_path / "lance1")
+        s1.upsert("a", [1.0, 0.0] + [0.0] * 766)
+        s2 = EmbeddingStore(tmp_path / "lance2")
+        s2.upsert("x", [0.95, 0.05] + [0.0] * 766)
+
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        fg.build_bridges(stores={"ns1": s1, "ns2": s2}, bridge_threshold=0.5, bridge_top_k=5)
+
+        uv = fg.unified_view
+        # Should have an edge between ns1::a and ns2::x (or vice versa)
+        has_edge = uv.has_edge("ns1::a", "ns2::x") or uv.has_edge("ns2::x", "ns1::a")
+        assert has_edge
+
+
 # ── Task 4: Federated entry point resolution ──────────────────────────────────
 
 from prism_rag.retrieve.entry import resolve_entry_points

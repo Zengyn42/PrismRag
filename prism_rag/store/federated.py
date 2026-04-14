@@ -9,7 +9,10 @@ not persisted — they depend on which graphs are loaded.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from prism_rag.store.embedding_store import EmbeddingStore
 
 import networkx as nx
 
@@ -112,12 +115,18 @@ class FederatedGraph:
                 return ns, qualified_id
         return "", qualified_id
 
-    def build_bridges(self) -> int:
+    def build_bridges(
+        self,
+        stores: dict[str, "EmbeddingStore"] | None = None,
+        bridge_threshold: float = 0.70,
+        bridge_top_k: int = 5,
+    ) -> int:
         """Compute cross-graph bridge edges.
 
         Bridge types:
         1. Shared tags: same tag node ID exists in multiple graphs
            → bridge between the tag nodes
+        2. Embedding similarity: nodes with similar embeddings across namespaces
 
         Returns: number of bridge edges created.
         """
@@ -126,7 +135,7 @@ class FederatedGraph:
         if self._single:
             return 0
 
-        # Shared tag bridges
+        # 1. Shared tag bridges
         tag_index: dict[str, list[str]] = {}  # tag_id → [namespace, ...]
         for ns, g in self._graphs.items():
             for node_id, data in g.g.nodes(data=True):
@@ -148,16 +157,78 @@ class FederatedGraph:
                         "weight": 0.5,
                     })
 
+        # 2. Embedding similarity bridges
+        if stores and len(stores) >= 2:
+            self._build_embedding_bridges(stores, bridge_threshold, bridge_top_k)
+
         logger.info(f"[federated] built {len(self._bridges)} bridge edges across {len(self._graphs)} graphs")
         return len(self._bridges)
 
+    def _build_embedding_bridges(
+        self,
+        stores: dict[str, "EmbeddingStore"],
+        threshold: float,
+        top_k: int,
+    ) -> None:
+        """Add embedding similarity bridges between namespace pairs."""
+        ns_list = sorted(stores.keys())
+        existing_bridges: set[tuple[str, str, str, str]] = set()
+
+        for i in range(len(ns_list)):
+            for j in range(i + 1, len(ns_list)):
+                ns_a, ns_b = ns_list[i], ns_list[j]
+                store_a, store_b = stores[ns_a], stores[ns_b]
+                vecs_a = store_a.all_embeddings()
+
+                for node_id_a, vec_a in vecs_a.items():
+                    # Verify node still exists in graph
+                    if node_id_a not in self._graphs[ns_a].g:
+                        continue
+
+                    results = store_b.search(vec_a, top_k=top_k)
+                    for node_id_b, distance in results:
+                        # Verify node still exists in graph
+                        graph_b = self._graphs.get(ns_b)
+                        if graph_b is None or node_id_b not in graph_b.g:
+                            continue
+
+                        # LanceDB returns L2 distance; convert to cosine similarity
+                        # For normalized vectors: cosine_sim ≈ 1 - (L2² / 2)
+                        similarity = 1.0 - (distance / 2.0)
+
+                        if similarity < threshold:
+                            continue
+
+                        # Avoid duplicate bridges
+                        key = (ns_a, node_id_a, ns_b, node_id_b)
+                        rev_key = (ns_b, node_id_b, ns_a, node_id_a)
+                        if key in existing_bridges or rev_key in existing_bridges:
+                            continue
+                        existing_bridges.add(key)
+
+                        self._bridges.append({
+                            "source_ns": ns_a,
+                            "source_id": node_id_a,
+                            "target_ns": ns_b,
+                            "target_id": node_id_b,
+                            "relation": "embedding_similar",
+                            "confidence": "INFERRED",
+                            "weight": round(similarity, 4),
+                            "source_pass": "embedding",
+                        })
+
+        emb_count = sum(1 for b in self._bridges if b["relation"] == "embedding_similar")
+        logger.info(f"[federated] embedding bridges: {emb_count}")
+
     @classmethod
-    def load(cls, sources: list) -> "FederatedGraph":
+    def load(cls, sources: list, settings=None) -> "FederatedGraph":
         """Load a FederatedGraph from a list of GraphSource configs.
         Skips sources whose graph.json doesn't exist (logs warning).
         Automatically computes bridge edges after loading.
+        Loads EmbeddingStores from lance/ subdirs when available.
         """
         graphs: dict[str, KnowledgeGraph] = {}
+        stores: dict[str, "EmbeddingStore"] = {}
         for src in sources:
             gpath = src.graph_path
             if not gpath.exists():
@@ -166,6 +237,29 @@ class FederatedGraph:
             g = KnowledgeGraph.load(gpath)
             graphs[src.namespace] = g
             logger.info(f"[federated] loaded {src.namespace}: {g.node_count} nodes, {g.edge_count} edges")
+
+            lance_path = src.data_dir / "lance"
+            if lance_path.exists():
+                try:
+                    from prism_rag.store.embedding_store import EmbeddingStore as ES
+                    store = ES(lance_path)
+                    if store.count() > 0:
+                        stores[src.namespace] = store
+                        logger.info(f"[federated] loaded embeddings for {src.namespace}: {store.count()} vectors")
+                except Exception as e:
+                    logger.warning(f"[federated] failed to load embeddings for {src.namespace}: {e}")
+
         fg = cls(graphs)
-        fg.build_bridges()
+
+        bridge_threshold = 0.70
+        bridge_top_k = 5
+        if settings:
+            bridge_threshold = getattr(settings, "bridge_similarity_threshold", 0.70)
+            bridge_top_k = getattr(settings, "bridge_top_k", 5)
+
+        fg.build_bridges(
+            stores=stores or None,
+            bridge_threshold=bridge_threshold,
+            bridge_top_k=bridge_top_k,
+        )
         return fg
