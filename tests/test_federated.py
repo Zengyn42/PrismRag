@@ -595,6 +595,57 @@ class TestFederatedE2E:
         assert fg.namespaces == ["meetings", "tech"]
 
 
+class TestEmbeddingBridgesE2E:
+    def test_embedding_bridge_enables_cross_namespace_bfs(self, tmp_path):
+        """Two graphs with NO shared tags but similar embeddings → BFS crosses via embedding bridge."""
+        from prism_rag.store.embedding_store import EmbeddingStore
+
+        # Two graphs with NO shared tags (shared-tag bridges won't help)
+        g1 = _make_graph([("ml-intro", "ML Introduction")], [])
+        g2 = _make_graph([("dl-guide", "Deep Learning Guide")], [])
+
+        # But their embeddings are similar (both about ML)
+        s1 = EmbeddingStore(tmp_path / "lance1")
+        s1.upsert("ml-intro", [0.9, 0.1] + [0.0] * 766)
+        s2 = EmbeddingStore(tmp_path / "lance2")
+        s2.upsert("dl-guide", [0.85, 0.15] + [0.0] * 766)
+
+        fg = FederatedGraph({"research": g1, "tutorials": g2})
+        fg.build_bridges(stores={"research": s1, "tutorials": s2}, bridge_threshold=0.5, bridge_top_k=5)
+
+        # Should have embedding bridge (no shared tags)
+        assert any(b["relation"] == "embedding_similar" for b in fg.bridges)
+        assert not any(b["relation"] == "shared_tag" for b in fg.bridges)
+
+        # BFS should cross the embedding bridge
+        results = federated_bfs(fg, "research", "ml-intro", budget=5000)
+        namespaces = {r["namespace"] for r in results}
+        assert "research" in namespaces
+        assert "tutorials" in namespaces, "BFS should cross embedding bridge to tutorials"
+
+    def test_embedding_bridge_trace_path(self, tmp_path):
+        """trace_path should find cross-namespace path via embedding bridge."""
+        import json
+        from prism_rag.mcp_server import server as mcp_mod
+        from prism_rag.store.embedding_store import EmbeddingStore
+
+        g1 = _make_graph([("a", "Alpha")], [])
+        g2 = _make_graph([("b", "Beta")], [])
+
+        s1 = EmbeddingStore(tmp_path / "lance1")
+        s1.upsert("a", [0.9, 0.1] + [0.0] * 766)
+        s2 = EmbeddingStore(tmp_path / "lance2")
+        s2.upsert("b", [0.85, 0.15] + [0.0] * 766)
+
+        fg = FederatedGraph({"ns1": g1, "ns2": g2})
+        fg.build_bridges(stores={"ns1": s1, "ns2": s2}, bridge_threshold=0.5, bridge_top_k=5)
+
+        mcp_mod._federated = fg
+        result = json.loads(mcp_mod.trace_path("ns1::a", "ns2::b", max_length=10))
+        assert "error" not in result, f"trace_path failed: {result}"
+        assert result["path_length"] >= 1
+
+
 class TestCrossNamespaceE2E:
     def test_full_cross_namespace_pipeline(self, tmp_path):
         """End-to-end: two graphs -> federate -> BFS crosses bridge -> trace_path crosses bridge."""

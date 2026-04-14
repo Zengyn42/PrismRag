@@ -55,7 +55,7 @@ def _ensure_federated() -> FederatedGraph:
     global _federated
     if _federated is None:
         settings = PrismRagSettings()
-        _federated = FederatedGraph.load(settings.resolved_graphs)
+        _federated = FederatedGraph.load(settings.resolved_graphs, settings=settings)
         logger.info(
             f"[mcp] federated loaded: {_federated.node_count} nodes, "
             f"{_federated.edge_count} edges across {len(_federated.namespaces)} namespaces"
