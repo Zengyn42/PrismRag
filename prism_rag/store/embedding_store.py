@@ -32,7 +32,10 @@ class EmbeddingStore:
         self._table = self._ensure_table()
 
     def _ensure_table(self):
-        if _TABLE_NAME in self._db.list_tables():
+        existing = self._db.list_tables()
+        # LanceDB >=0.20 returns ListTablesResponse with .tables attribute
+        table_names = getattr(existing, "tables", existing)
+        if _TABLE_NAME in table_names:
             return self._db.open_table(_TABLE_NAME)
         return self._db.create_table(_TABLE_NAME, schema=_SCHEMA)
 
