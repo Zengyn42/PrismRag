@@ -521,9 +521,10 @@ def write_note(path: str, content: str, cas_hash: str = "", namespace: str = "")
     Returns:
         JSON with new cas_hash and graph update stats.
     """
-    from prism_rag.vault_ops.cas import compute_hash, get_file_lock, verify_cas
+    from prism_rag.vault_ops.cas import write_with_cas, CASConflict
     from prism_rag.vault_ops.errors import VaultErrorCode, fail, ok
     from prism_rag.vault_ops.vault import Vault
+    from prism_rag.vault_ops.audit_log import log_operation as _audit
     from prism_rag.ingest.incremental import ingest_file
 
     settings = PrismRagSettings()
@@ -547,44 +548,34 @@ def write_note(path: str, content: str, cas_hash: str = "", namespace: str = "")
     if isinstance(resolved, dict):
         return json.dumps(resolved, ensure_ascii=False)
 
-    lock = get_file_lock(resolved)
-
-    # Sync write (MCP tools are sync in FastMCP)
+    # Atomic CAS write — verify and write are one operation, no TOCTOU window
     expected = cas_hash if cas_hash else None
-    is_valid, actual = verify_cas(resolved, expected)
-
-    if not is_valid:
-        from prism_rag.vault_ops.audit_log import log_operation as _audit
+    try:
+        new_hash = write_with_cas(resolved, content, expected_hash=expected)
+    except CASConflict as e:
         _audit(
             tool="write_note", target=str(path), action="write",
             status="conflict",
-            cas_before=actual or "",
+            cas_before=str(e.actual),
             namespace=src.namespace,
-            expected_hash=expected or "<new>",
+            expected_hash=str(e.expected),
         )
         if expected is None:
             return json.dumps(fail(
                 VaultErrorCode.ALREADY_EXISTS,
                 f"File already exists: {path}. Use read_note to get cas_hash first.",
-                actual_hash=actual,
+                actual_hash=e.actual,
             ), ensure_ascii=False)
         return json.dumps(fail(
             VaultErrorCode.CONFLICT,
             f"CAS conflict: file has been modified.",
-            expected_hash=expected, actual_hash=actual,
+            expected_hash=e.expected, actual_hash=e.actual,
         ), ensure_ascii=False)
-
-    # Atomic write
-    from prism_rag.vault_ops.cas import atomic_write
-    from prism_rag.vault_ops.audit_log import log_operation as _audit
-
-    atomic_write(resolved, content)
-    new_hash = compute_hash(content)
 
     _audit(
         tool="write_note", target=str(path), action="write",
         status="ok",
-        cas_before=actual or "",
+        cas_before=expected or "",
         cas_after=new_hash,
         namespace=src.namespace,
     )
