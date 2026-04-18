@@ -111,3 +111,46 @@ def test_relations_supersedes_edge_type(tmp_path):
     extract_ast(graph, docs)
 
     assert graph.g.edges["KNOW-100", "KNOW-040"]["relation"] == "supersedes"
+
+
+def test_embed_false_skips_node(tmp_path):
+    """Node with frontmatter embed: false must NOT appear in embeddable set."""
+    from prism_rag.ingest.embedder import _get_embeddable_nodes
+
+    a = tmp_path / "knowledge" / "KNOW-REL.md"
+    a.parent.mkdir()
+    a.write_text(
+        "---\n"
+        "knowledge_id: KNOW-REL\n"
+        "type: relation\n"
+        "embed: false\n"
+        "---\n\nRelation-only node"
+    )
+    b = tmp_path / "note.md"
+    b.write_text("regular content")
+
+    docs = load_vault(tmp_path)
+    graph = KnowledgeGraph()
+    extract_ast(graph, docs)
+
+    embeddable_ids = {node_id for node_id, _ in _get_embeddable_nodes(graph)}
+
+    # KNOW-REL has embed: false → excluded
+    assert "KNOW-REL" not in embeddable_ids
+    # note.md has no embed directive → included (kind="note" + has content)
+    assert "note" in embeddable_ids
+
+
+def test_embed_default_true_knowledge_node(tmp_path):
+    """Knowledge node WITHOUT embed directive is still embeddable."""
+    from prism_rag.ingest.embedder import _get_embeddable_nodes
+
+    p = tmp_path / "KNOW-X.md"
+    p.write_text("---\nknowledge_id: KNOW-X\n---\n\ncontent here")
+    docs = load_vault(tmp_path)
+    graph = KnowledgeGraph()
+    extract_ast(graph, docs)
+
+    embeddable_ids = {node_id for node_id, _ in _get_embeddable_nodes(graph)}
+    # KNOW-X is kind=knowledge, no embed: false → should be included
+    assert "KNOW-X" in embeddable_ids
