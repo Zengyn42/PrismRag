@@ -86,3 +86,30 @@ def test_extract_pdf_empty_file_returns_empty(tmp_path):
     _make_blank_pdf(fixture)
     text = extract_pdf(fixture)
     assert text == ""
+
+
+def test_full_ingest_adds_pdf_node(tmp_path):
+    """An ingest-style pipeline on a vault with a PDF produces a kind='pdf' node."""
+    from prism_rag.ingest.ast_extractor import extract_ast
+    from prism_rag.ingest.vault_loader import discover_vault_files, VaultMedia, load_vault
+    from prism_rag.ingest.media_extractor import add_media_nodes
+    from prism_rag.store.graph import KnowledgeGraph
+
+    vault = tmp_path
+    (vault / "note.md").write_text("just a note")
+    _make_blank_pdf(vault / "report.pdf")
+
+    graph = KnowledgeGraph()
+
+    # Markdown side
+    docs = load_vault(vault)
+    extract_ast(graph, docs)
+
+    # Media side
+    media_paths = [p for p in discover_vault_files(vault) if p.suffix == ".pdf"]
+    media = [VaultMedia.from_path(p, vault) for p in media_paths]
+    added = add_media_nodes(graph, media)
+
+    assert added == 1
+    assert "report" in graph.g.nodes
+    assert graph.g.nodes["report"]["kind"] == "pdf"

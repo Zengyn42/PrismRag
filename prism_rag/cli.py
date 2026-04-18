@@ -91,6 +91,19 @@ def ingest(
     extract_ast(graph, docs)
     typer.echo(f"   Nodes: {graph.node_count} · Edges: {graph.edge_count}")
 
+    # ── Pass 2: Media extraction ──
+    from prism_rag.ingest.media_extractor import add_media_nodes
+    from prism_rag.ingest.vault_loader import VaultMedia, discover_vault_files
+
+    typer.secho("\n📄 Pass 2: Extracting PDF content...", fg=typer.colors.BLUE)
+    media_paths = [
+        p for p in discover_vault_files(settings.vault_path)
+        if p.suffix.lower() == ".pdf"
+    ]
+    media = [VaultMedia.from_path(p, settings.vault_path) for p in media_paths]
+    n_media = add_media_nodes(graph, media)
+    typer.echo(f"   PDF nodes: {n_media}")
+
     # ── Pass 3: Embedding + similarity edges ──
     if skip_embed:
         typer.secho("\n⏭  Pass 3: Embedding (skipped by --skip-embed)", fg=typer.colors.YELLOW)
