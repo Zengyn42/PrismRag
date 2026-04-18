@@ -54,7 +54,14 @@ class VaultDocument:
 
     @property
     def id(self) -> str:
-        """Stable node ID: relative path without .md extension, POSIX-style."""
+        """Stable node ID.
+
+        If frontmatter declares a knowledge_id (Phase 2 atomic node), use it.
+        Otherwise fall back to relative path without .md extension, POSIX-style.
+        """
+        kid = self.frontmatter.get("knowledge_id")
+        if kid:
+            return str(kid)
         return self.relative_path.with_suffix("").as_posix()
 
     @property
