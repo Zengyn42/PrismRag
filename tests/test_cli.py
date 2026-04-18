@@ -132,3 +132,32 @@ def test_ingest_with_no_embedding_flag(tmp_path):
     )
     assert result.returncode == 0, f"stderr={result.stderr}"
     assert (data / "graph.json").exists()
+
+
+def test_cli_ingest_single_file(tmp_path):
+    vault = tmp_path / "vault"
+    data = tmp_path / "data"
+    vault.mkdir()
+    data.mkdir()
+    (vault / "only.md").write_text("# Only\n\nno links")
+
+    env = os.environ.copy()
+    env["PRISM_GEMINI_API_KEY"] = ""
+
+    result = subprocess.run(
+        _prism_rag_cmd() + [
+            "ingest",
+            "--vault", str(vault),
+            "--output", str(data),
+            "--no-embedding",
+        ],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert result.returncode == 0, f"stderr={result.stderr}"
+    assert (data / "graph.json").exists()
+    assert (data / "GRAPH_REPORT.md").exists()
+
+    import json as _json
+    data_dict = _json.loads((data / "graph.json").read_text())
+    node_ids = {n["id"] for n in data_dict["nodes"]}
+    assert "only" in node_ids
