@@ -227,3 +227,12 @@ def test_cli_info_shows_stats(tmp_path):
     assert result.returncode == 0
     assert "Nodes:" in result.stdout or "nodes" in result.stdout.lower()
     assert "2" in result.stdout  # 2 markdown nodes
+
+
+def test_cli_version():
+    result = subprocess.run(
+        _prism_rag_cmd() + ["version"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0
+    assert "PrismRag" in result.stdout
