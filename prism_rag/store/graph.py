@@ -48,7 +48,7 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 Confidence = Literal["EXTRACTED", "INFERRED", "AMBIGUOUS"]
-NodeKind = Literal["note", "tag", "category", "image", "pdf", "audio", "section", "block"]
+NodeKind = Literal["note", "knowledge", "tag", "category", "image", "pdf", "audio", "section", "block"]
 SourcePass = Literal["ast", "media", "embedding", "llm"]
 
 # ── Six-space Am attributes (K-space attribute dimension) ─────────────────
