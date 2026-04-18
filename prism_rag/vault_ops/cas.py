@@ -71,3 +71,60 @@ def verify_cas(
 
     actual = compute_file_hash(path)
     return actual == expected_hash, actual
+
+
+import os
+
+
+class CASConflict(Exception):
+    """Raised when expected_hash does not match the current file hash."""
+
+    def __init__(self, path: Path, expected: str, actual: str):
+        super().__init__(
+            f"CAS conflict on {path}: expected={expected}, actual={actual}"
+        )
+        self.path = path
+        self.expected = expected
+        self.actual = actual
+
+
+def atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """Write `content` to `path` atomically via tempfile + os.replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(content, encoding=encoding)
+        os.replace(tmp, path)
+    except Exception:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def write_with_cas(path: Path, content: str, expected_hash: str | None) -> str:
+    """Atomically write `content`, honouring optimistic CAS.
+
+    expected_hash:
+      - None   → file must NOT exist (create-only)
+      - str    → file must exist, SHA-256 must match (with or without 'sha256:' prefix)
+
+    Returns the new hash. Raises `CASConflict` on mismatch or pre-existence.
+    """
+    exists = path.exists()
+
+    if expected_hash is None:
+        if exists:
+            raise CASConflict(path, "<new>", compute_file_hash(path))
+    else:
+        if not exists:
+            raise CASConflict(path, expected_hash, "<missing>")
+        expected_clean = expected_hash.removeprefix("sha256:")
+        actual = compute_file_hash(path)
+        if actual != expected_clean:
+            raise CASConflict(path, expected_hash, actual)
+
+    atomic_write(path, content)
+    return compute_hash(content)
