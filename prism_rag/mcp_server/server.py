@@ -70,6 +70,7 @@ def _node_summary(graph: KnowledgeGraph, node_id: str, include_content: bool = F
         "id": node_id,
         "label": data.get("label", node_id),
         "kind": data.get("kind", "?"),
+        "ontology_type": data.get("ontology_type"),
         "tokens": data.get("tokens", 0),
         "community": data.get("community_id", ""),
         "degree": graph.degree(node_id),
@@ -109,6 +110,7 @@ def search_knowledge(
     budget: int = 4000,
     mode: str = "bfs",
     scope: str = "",
+    ontology_type: str = "",
 ) -> str:
     """Search the knowledge graph for information about a topic.
 
@@ -120,6 +122,8 @@ def search_knowledge(
         budget: Maximum tokens to return (default 4000)
         mode: Traversal mode — "bfs" (broad context) or "dfs" (follow chains)
         scope: Namespace to search (e.g., "nimbus"). Empty = search all.
+        ontology_type: Filter results to nodes with this ontology_type (e.g., "decision",
+                       "concept", "fact"). Empty string (default) = no filter.
 
     Returns:
         JSON with entry point, traversed nodes, and their content.
@@ -137,23 +141,29 @@ def search_knowledge(
     else:
         nodes = federated_bfs(fg, ns, entry_id, budget=budget, scope=scope or None)
 
+    # Build node list — include note and knowledge nodes; filter by ontology_type if given
+    node_list = []
+    for n in nodes:
+        if n.get("kind") not in ("note", "knowledge"):
+            continue
+        if ontology_type and n.get("ontology_type") != ontology_type:
+            continue
+        node_list.append({
+            "id": f"{ns}::{n['id']}" if not fg.is_single else n["id"],
+            "label": n.get("label", n["id"]),
+            "kind": n.get("kind", "?"),
+            "ontology_type": n.get("ontology_type"),
+            "tokens": n.get("tokens", 0),
+            "community": n.get("community_id", ""),
+            "content": n.get("content", "")[:2000],
+        })
+
     result = {
         "entry_point": _node_summary(graph, entry_id),
         "namespace": ns,
-        "total_nodes": len(nodes),
+        "total_nodes": len(node_list),
         "total_tokens": sum(n.get("tokens", 0) for n in nodes),
-        "nodes": [
-            {
-                "id": f"{ns}::{n['id']}" if not fg.is_single else n["id"],
-                "label": n.get("label", n["id"]),
-                "kind": n.get("kind", "?"),
-                "tokens": n.get("tokens", 0),
-                "community": n.get("community_id", ""),
-                "content": n.get("content", "")[:2000],
-            }
-            for n in nodes
-            if n.get("kind") == "note"
-        ],
+        "nodes": node_list,
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -308,11 +318,15 @@ def trace_path(from_node: str, to_node: str, max_length: int = 5) -> str:
 
 
 @mcp.tool()
-def list_communities() -> str:
+def list_communities(ontology_type: str = "") -> str:
     """List all Leiden communities in the knowledge graph.
 
     Returns an overview with community labels, sizes, god nodes, and density.
     Aggregates communities across all loaded namespaces.
+
+    Args:
+        ontology_type: Filter — only include communities that contain at least one
+                       member with this ontology_type. Empty string (default) = no filter.
     """
     fg = _ensure_federated()
 
@@ -326,6 +340,16 @@ def list_communities() -> str:
         total_edges += graph.edge_count
 
         for comm in sorted(graph.communities.values(), key=lambda c: -c.member_count):
+            # If ontology_type filter active, skip communities with no matching members
+            if ontology_type:
+                has_match = any(
+                    graph.g.nodes[nid].get("ontology_type") == ontology_type
+                    for nid in graph.g.nodes
+                    if graph.g.nodes[nid].get("community_id") == comm.id
+                )
+                if not has_match:
+                    continue
+
             comm_id = comm.id if fg.is_single else f"{ns}::{comm.id}"
             communities.append({
                 "id": comm_id,
@@ -351,12 +375,14 @@ def list_communities() -> str:
 
 
 @mcp.tool()
-def explore_community(community: str) -> str:
+def explore_community(community: str, ontology_type: str = "") -> str:
     """Explore a specific community's members and connections.
 
     Args:
         community: Community ID (e.g., "community_000" or "namespace::community_000")
                    or label substring.
+        ontology_type: Filter returned members to only those with this ontology_type
+                       (e.g., "decision", "concept"). Empty string (default) = no filter.
 
     Returns:
         JSON with all members, internal edges, and bridge edges to other communities.
@@ -405,11 +431,12 @@ def explore_community(community: str) -> str:
 
     graph = target_graph
 
-    # Members
+    # Members (optionally filtered by ontology_type)
     members = [
         _node_summary(graph, nid)
         for nid, data in graph.g.nodes(data=True)
         if data.get("community_id") == target_comm.id
+        and (not ontology_type or data.get("ontology_type") == ontology_type)
     ]
 
     # Internal edges (both endpoints in this community)

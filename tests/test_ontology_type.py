@@ -62,3 +62,51 @@ def test_no_type_leaves_ontology_type_none(tmp_path):
     extract_ast(graph, docs)
     ont = graph.g.nodes["note"].get("ontology_type")
     assert ont is None
+
+
+def test_search_knowledge_filters_by_ontology_type(tmp_path, monkeypatch):
+    """search_knowledge with ontology_type='decision' excludes non-decisions."""
+    import json
+    from prism_rag.config import PrismRagSettings, GraphSource
+    from prism_rag.mcp_server import server as mcp_server
+
+    vault = tmp_path / "vault"
+    data = tmp_path / "data"
+    vault.mkdir()
+    data.mkdir()
+
+    # Link them so BFS from the decision node can reach the fact node
+    (vault / "dec.md").write_text(
+        "---\nknowledge_id: KNOW-D\ntype: decision\n---\nA decision about X. [[fact]]"
+    )
+    (vault / "fact.md").write_text(
+        "---\nknowledge_id: KNOW-F\ntype: fact\n---\nA fact about X"
+    )
+
+    # Build and persist graph
+    from prism_rag.ingest.vault_loader import load_vault as lv
+    from prism_rag.ingest.ast_extractor import extract_ast
+    from prism_rag.store.graph import KnowledgeGraph as KG
+    g = KG()
+    extract_ast(g, lv(vault))
+    g.save(data / "graph.json")
+
+    # Reset server state
+    mcp_server._federated = None
+
+    settings = PrismRagSettings(
+        graphs=[GraphSource(namespace="default", vault_path=vault, data_dir=data)],
+    )
+    monkeypatch.setattr(
+        "prism_rag.mcp_server.server.PrismRagSettings",
+        lambda: settings,
+    )
+
+    # Query "dec" matches the decision node; BFS will also reach the linked fact node.
+    # With ontology_type="decision" filter, KNOW-F (fact) must be excluded.
+    result = mcp_server.search_knowledge(query="dec", ontology_type="decision")
+    parsed = json.loads(result)
+    # Be lenient on response shape — just verify KNOW-F is NOT in results and KNOW-D IS.
+    response_text = result
+    assert "KNOW-F" not in response_text
+    assert "KNOW-D" in response_text
