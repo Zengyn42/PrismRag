@@ -73,3 +73,84 @@ def test_audit_log_appends_jsonl(tmp_path, monkeypatch):
     assert r2["status"] == "conflict" and r2["error"] == "CASConflict"
     # ISO-8601 timestamp with timezone
     assert "T" in r1["ts"]
+
+
+def test_write_note_logs_audit_on_success(tmp_path, monkeypatch):
+    """Successful write_note produces audit entry with status='ok'."""
+    from prism_rag.config import PrismRagSettings, GraphSource
+    from prism_rag.mcp_server import server as mcp_server
+    from prism_rag.vault_ops import audit_log as al
+
+    vault = tmp_path / "vault"
+    data = tmp_path / "data"
+    vault.mkdir()
+    data.mkdir()
+
+    # Seed empty graph
+    from prism_rag.store.graph import KnowledgeGraph
+    KnowledgeGraph().save(data / "graph.json")
+
+    audit_path = data / "audit.jsonl"
+    monkeypatch.setattr(al, "_audit_path", lambda: audit_path)
+
+    settings = PrismRagSettings(
+        graphs=[GraphSource(namespace="default", vault_path=vault, data_dir=data, writable=True)],
+    )
+    monkeypatch.setattr(
+        "prism_rag.mcp_server.server.PrismRagSettings",
+        lambda: settings,
+    )
+    mcp_server._federated = None
+
+    result = mcp_server.write_note(
+        path="new.md",
+        content="# Hello",
+        cas_hash="",
+        namespace="default",
+    )
+    parsed = json.loads(result)
+    assert parsed.get("status") == "ok"
+
+    assert audit_path.exists()
+    entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    assert any(e["tool"] == "write_note" and e["status"] == "ok" for e in entries)
+
+
+def test_write_note_cas_conflict_logs_audit(tmp_path, monkeypatch):
+    """CAS conflict produces audit entry with status='conflict'."""
+    from prism_rag.config import PrismRagSettings, GraphSource
+    from prism_rag.mcp_server import server as mcp_server
+    from prism_rag.vault_ops import audit_log as al
+
+    vault = tmp_path / "vault"
+    data = tmp_path / "data"
+    vault.mkdir()
+    data.mkdir()
+    (vault / "existing.md").write_text("v1")
+
+    from prism_rag.store.graph import KnowledgeGraph
+    KnowledgeGraph().save(data / "graph.json")
+
+    audit_path = data / "audit.jsonl"
+    monkeypatch.setattr(al, "_audit_path", lambda: audit_path)
+
+    settings = PrismRagSettings(
+        graphs=[GraphSource(namespace="default", vault_path=vault, data_dir=data, writable=True)],
+    )
+    monkeypatch.setattr(
+        "prism_rag.mcp_server.server.PrismRagSettings",
+        lambda: settings,
+    )
+    mcp_server._federated = None
+
+    result = mcp_server.write_note(
+        path="existing.md",
+        content="v2",
+        cas_hash="sha256:wronghash",
+        namespace="default",
+    )
+    parsed = json.loads(result)
+    assert parsed.get("status") != "ok"
+
+    entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    assert any(e["status"] == "conflict" for e in entries)
