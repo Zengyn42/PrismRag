@@ -84,6 +84,25 @@ def _add_single_doc_ast(
     doc_index[doc.label.lower()] = doc.id
     doc_index[doc.id.lower()] = doc.id
 
+    # Extract Am attributes and ontology_type from frontmatter (mirrors extract_ast)
+    fm = doc.frontmatter
+    _maturity = fm.get("maturity")
+    _confidence = fm.get("confidence")
+    _actionability = fm.get("actionability")
+    fm_type = fm.get("type")
+
+    _VALID_ONT = {
+        "concept", "entity", "process", "tool", "project",
+        "fact", "decision", "rule", "procedure", "relation",
+        "unclassified",
+    }
+    if fm_type is None:
+        _ont = None
+    elif fm_type in _VALID_ONT:
+        _ont = fm_type
+    else:
+        _ont = "unclassified"
+
     # Add note/knowledge node
     note = Node(
         id=doc.id,
@@ -94,6 +113,10 @@ def _add_single_doc_ast(
         content_hash=doc.content_hash,
         tokens=_token_count(doc.content),
         frontmatter=doc.frontmatter,
+        maturity=_maturity if _maturity in ("seed", "growing", "mature", "archived") else None,
+        confidence=_confidence if _confidence in ("high", "medium", "low") else None,
+        actionability=_actionability if _actionability in ("reference", "decision", "task") else None,
+        ontology_type=_ont,
     )
     graph.add_node(note)
 

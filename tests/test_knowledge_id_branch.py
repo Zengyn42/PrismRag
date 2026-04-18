@@ -200,3 +200,43 @@ def test_incremental_ingest_with_knowledge_id(tmp_path):
     assert g2.g.nodes["KNOW-042"]["kind"] == "knowledge"
     assert g2.g.has_edge("KNOW-042", "KNOW-001")
     assert g2.g.edges["KNOW-042", "KNOW-001"]["relation"] == "depends_on"
+
+
+def test_incremental_ingest_preserves_ontology_and_am(tmp_path):
+    """ingest_file must populate ontology_type + Am attributes (regression)."""
+    from prism_rag.config import PrismRagSettings
+    from prism_rag.ingest.incremental import ingest_file
+    from prism_rag.ingest.ast_extractor import extract_ast
+    from prism_rag.ingest.vault_loader import load_vault as _lv
+    from prism_rag.store.graph import KnowledgeGraph as _KG
+
+    vault = tmp_path / "vault"
+    data = tmp_path / "data"
+    vault.mkdir()
+    data.mkdir()
+
+    # Seed with an initial empty graph
+    _KG().save((data / "graph.json"))
+
+    settings = PrismRagSettings(vault_path=vault, data_dir=data, gemini_api_key="")
+
+    new_file = vault / "dec.md"
+    new_file.write_text(
+        "---\n"
+        "knowledge_id: KNOW-XYZ\n"
+        "type: decision\n"
+        "maturity: mature\n"
+        "confidence: high\n"
+        "actionability: decision\n"
+        "---\n\nContent"
+    )
+
+    result = ingest_file(new_file, settings=settings, skip_embed=True)
+    assert result["node_id"] == "KNOW-XYZ"
+
+    g = _KG.load(settings.graph_path)
+    node = g.g.nodes["KNOW-XYZ"]
+    assert node["ontology_type"] == "decision"
+    assert node["maturity"] == "mature"
+    assert node["confidence"] == "high"
+    assert node["actionability"] == "decision"
