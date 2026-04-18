@@ -91,17 +91,21 @@ def _extract_inline_tags(text: str) -> set[str]:
 
 
 def _build_doc_index(docs: Iterable[VaultDocument]) -> dict[str, str]:
-    """Build a case-insensitive index mapping display names/aliases → canonical node IDs.
+    """Build lowercase name → canonical doc.id lookup.
 
-    Obsidian wikilinks use either the filename stem or a frontmatter alias.
+    Keys registered:
+    - filename stem (doc.label)
+    - frontmatter aliases
+    - knowledge_id if present (Phase 2)
     """
     index: dict[str, str] = {}
     for doc in docs:
-        # Primary: filename stem
         index[doc.label.lower()] = doc.id
-        # Aliases from frontmatter
         for alias in doc.aliases:
             index[alias.lower()] = doc.id
+        kid = doc.frontmatter.get("knowledge_id")
+        if kid:
+            index[str(kid).lower()] = doc.id
     return index
 
 
@@ -154,10 +158,12 @@ def extract_ast(graph: KnowledgeGraph, docs: list[VaultDocument]) -> None:
         _confidence = fm.get("confidence")
         _actionability = fm.get("actionability")
 
+        kind = "knowledge" if doc.frontmatter.get("knowledge_id") else "note"
+
         note = Node(
             id=doc.id,
             label=doc.label,
-            kind="note",
+            kind=kind,
             source_file=str(doc.relative_path),
             content=doc.content,
             content_hash=doc.content_hash,
