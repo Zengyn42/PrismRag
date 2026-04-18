@@ -196,3 +196,34 @@ def test_cli_query_finds_node(tmp_path):
     )
     assert query.returncode == 0
     assert "target" in query.stdout.lower()
+
+
+def test_cli_info_shows_stats(tmp_path):
+    vault = tmp_path / "vault"
+    data = tmp_path / "data"
+    vault.mkdir()
+    data.mkdir()
+    (vault / "a.md").write_text("# A\n\n[[B]]")
+    (vault / "b.md").write_text("# B")
+
+    env = os.environ.copy()
+    env["PRISM_GEMINI_API_KEY"] = ""
+
+    subprocess.run(
+        _prism_rag_cmd() + [
+            "ingest",
+            "--vault", str(vault),
+            "--output", str(data),
+            "--no-embedding",
+        ],
+        check=True, env=env, timeout=30,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        _prism_rag_cmd() + ["info", "--graph", str(data / "graph.json")],
+        capture_output=True, text=True, env=env, timeout=10,
+    )
+    assert result.returncode == 0
+    assert "Nodes:" in result.stdout or "nodes" in result.stdout.lower()
+    assert "2" in result.stdout  # 2 markdown nodes
