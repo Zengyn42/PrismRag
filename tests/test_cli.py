@@ -277,3 +277,38 @@ def test_cli_incremental_add(tmp_path):
         or "Updated" in result.stdout
         or "added" in result.stdout.lower()
     )
+
+
+def test_cli_ingest_vault_with_pdf(tmp_path):
+    """ingest of a vault containing a PDF produces a kind=pdf node."""
+    import json as _json
+    vault = tmp_path / "vault"
+    data = tmp_path / "data"
+    vault.mkdir()
+    data.mkdir()
+    (vault / "note.md").write_text("# Note")
+
+    # Write a minimal PDF via pypdf
+    from pypdf import PdfWriter
+    w = PdfWriter()
+    w.add_blank_page(width=200, height=200)
+    with (vault / "doc.pdf").open("wb") as fh:
+        w.write(fh)
+
+    env = os.environ.copy()
+    env["PRISM_GEMINI_API_KEY"] = ""
+
+    result = subprocess.run(
+        _prism_rag_cmd() + [
+            "ingest",
+            "--vault", str(vault),
+            "--output", str(data),
+            "--no-embedding",
+        ],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert result.returncode == 0, f"stderr={result.stderr}"
+
+    graph_data = _json.loads((data / "graph.json").read_text())
+    kinds = {n.get("kind") for n in graph_data["nodes"]}
+    assert "pdf" in kinds
