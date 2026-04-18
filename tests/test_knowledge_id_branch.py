@@ -64,3 +64,50 @@ def test_regular_note_still_kind_note(tmp_path):
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
     assert graph.g.nodes["regular"]["kind"] == "note"
+
+
+def test_relations_frontmatter_produces_edges(tmp_path):
+    """frontmatter.relations.{depends_on,supersedes,...} emit typed EXTRACTED edges."""
+    a = tmp_path / "knowledge" / "KNOW-001-base.md"
+    a.parent.mkdir()
+    a.write_text("---\nknowledge_id: KNOW-001\n---\n\nBase concept")
+
+    b = tmp_path / "knowledge" / "KNOW-042-dep.md"
+    b.write_text(
+        "---\n"
+        "knowledge_id: KNOW-042\n"
+        "relations:\n"
+        "  depends_on: [KNOW-001]\n"
+        "  supersedes: []\n"
+        "---\n\nDepends on KNOW-001"
+    )
+
+    docs = load_vault(tmp_path)
+    graph = KnowledgeGraph()
+    extract_ast(graph, docs)
+
+    assert graph.g.has_edge("KNOW-042", "KNOW-001")
+    edge = graph.g.edges["KNOW-042", "KNOW-001"]
+    assert edge["relation"] == "depends_on"
+    assert edge["confidence"] == "EXTRACTED"
+    assert edge["source_pass"] == "ast"
+
+
+def test_relations_supersedes_edge_type(tmp_path):
+    a = tmp_path / "knowledge" / "KNOW-040.md"
+    a.parent.mkdir()
+    a.write_text("---\nknowledge_id: KNOW-040\n---\n\nOld")
+    b = tmp_path / "knowledge" / "KNOW-100.md"
+    b.write_text(
+        "---\n"
+        "knowledge_id: KNOW-100\n"
+        "relations:\n"
+        "  supersedes: [KNOW-040]\n"
+        "---\n\nNew"
+    )
+
+    docs = load_vault(tmp_path)
+    graph = KnowledgeGraph()
+    extract_ast(graph, docs)
+
+    assert graph.g.edges["KNOW-100", "KNOW-040"]["relation"] == "supersedes"

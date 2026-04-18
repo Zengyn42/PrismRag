@@ -122,6 +122,55 @@ def _category_node_id(category: str) -> str:
     return f"category:{category}"
 
 
+_RELATION_TYPES = ("supersedes", "superseded_by", "depends_on", "refines", "contradicts", "references")
+
+
+def _extract_relations_edges(
+    graph: KnowledgeGraph,
+    doc: VaultDocument,
+    doc_index: dict[str, str],
+) -> int:
+    """Emit EXTRACTED edges from frontmatter.relations.{type}: [targets].
+
+    Returns number of edges emitted.
+    """
+    relations = doc.frontmatter.get("relations")
+    if not isinstance(relations, dict):
+        return 0
+
+    count = 0
+    for rel_type in _RELATION_TYPES:
+        targets = relations.get(rel_type)
+        if not targets:
+            continue
+        # Normalize: accept str or list[str]
+        if isinstance(targets, str):
+            targets = [targets]
+        elif not isinstance(targets, list):
+            continue
+
+        for target in targets:
+            target_str = str(target).strip()
+            if not target_str:
+                continue
+            resolved = _resolve_wikilink(target_str, doc_index)
+            if resolved is None or resolved == doc.id:
+                continue
+            graph.add_edge(
+                Edge(
+                    source=doc.id,
+                    target=resolved,
+                    relation=rel_type,
+                    confidence="EXTRACTED",
+                    confidence_score=1.0,
+                    weight=1.0,
+                    source_pass="ast",
+                )
+            )
+            count += 1
+    return count
+
+
 import tiktoken
 
 _enc = tiktoken.get_encoding("cl100k_base")
@@ -238,7 +287,10 @@ def extract_ast(graph: KnowledgeGraph, docs: list[VaultDocument]) -> None:
                 )
             )
 
-        # 4d: Aliases (point aliased names → the canonical doc)
+        # 4d: Relations frontmatter (Phase 2 explicit typed edges)
+        _extract_relations_edges(graph, doc, doc_index)
+
+        # 4e: Aliases (point aliased names → the canonical doc)
         # Note: we don't add edges for aliases since the index already maps them.
         # If we wanted to expose alias relationships in the graph, we'd add
         # 'aliased_as' self-edges or alias nodes, but that's not useful for MVP.
