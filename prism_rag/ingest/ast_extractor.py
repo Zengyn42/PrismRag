@@ -21,11 +21,14 @@ false positives (e.g., `#include` in C code).
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterable
 
 from prism_rag.ingest.vault_loader import VaultDocument
 from prism_rag.store.graph import Edge, KnowledgeGraph, Node
+
+logger = logging.getLogger(__name__)
 
 # ── Regex patterns ───────────────────────────────────────────────────
 
@@ -90,22 +93,85 @@ def _extract_inline_tags(text: str) -> set[str]:
     return {match.group(1) for match in _TAG_RE.finditer(cleaned)}
 
 
-def _build_doc_index(docs: Iterable[VaultDocument]) -> dict[str, str]:
-    """Build lowercase name → canonical doc.id lookup.
+def _priority_tier(doc: VaultDocument) -> int:
+    """Return collision-resolution priority (higher wins).
 
-    Keys registered:
-    - filename stem (doc.label)
-    - frontmatter aliases
-    - knowledge_id if present (Phase 2)
+    Tier 3: has knowledge_id
+    Tier 2: canonical: true in frontmatter
+    Tier 1: lives under knowledge/ directory
+    Tier 0: everything else
     """
-    index: dict[str, str] = {}
-    for doc in docs:
-        index[doc.label.lower()] = doc.id
+    if doc.frontmatter.get("knowledge_id"):
+        return 3
+    if doc.frontmatter.get("canonical") is True:
+        return 2
+    try:
+        parts = doc.relative_path.parts
+    except AttributeError:
+        parts = ()
+    if "knowledge" in parts:
+        return 1
+    return 0
+
+
+def _build_doc_index(docs: Iterable[VaultDocument]) -> dict[str, str]:
+    """Build lowercase name → canonical doc.id lookup with tiered collision resolution.
+
+    On collision:
+      - Higher-priority tier wins
+      - Same-tier collision → key NOT registered (wikilinks to it fail resolution)
+      - Always log a warning on collision (regardless of outcome)
+
+    Keys registered per doc: filename stem (lowercased), aliases (lowercased),
+    knowledge_id (lowercased) if present.
+    """
+    docs_list = list(docs)
+    candidates: dict[str, list[VaultDocument]] = {}
+
+    def _register(key: str, doc: VaultDocument) -> None:
+        candidates.setdefault(key.lower(), []).append(doc)
+
+    for doc in docs_list:
+        _register(doc.label, doc)
         for alias in doc.aliases:
-            index[alias.lower()] = doc.id
+            _register(alias, doc)
         kid = doc.frontmatter.get("knowledge_id")
         if kid:
-            index[str(kid).lower()] = doc.id
+            _register(str(kid), doc)
+
+    index: dict[str, str] = {}
+    for key, cands in candidates.items():
+        # Deduplicate: the same doc might register under multiple names (label + alias + kid)
+        # but we only treat as collision when DIFFERENT docs compete for the same key
+        unique_docs: list[VaultDocument] = []
+        seen_ids: set[str] = set()
+        for d in cands:
+            if d.id not in seen_ids:
+                unique_docs.append(d)
+                seen_ids.add(d.id)
+
+        if len(unique_docs) == 1:
+            index[key] = unique_docs[0].id
+            continue
+
+        by_tier: dict[int, list[VaultDocument]] = {}
+        for d in unique_docs:
+            by_tier.setdefault(_priority_tier(d), []).append(d)
+        max_tier = max(by_tier.keys())
+        winners = by_tier[max_tier]
+
+        if len(winners) == 1:
+            logger.warning(
+                f"[ast_extractor] collision on key {key!r}: winner={winners[0].id} "
+                f"(tier {max_tier}), others={[d.id for d in unique_docs if d.id != winners[0].id]}"
+            )
+            index[key] = winners[0].id
+        else:
+            logger.warning(
+                f"[ast_extractor] AMBIGUOUS collision on key {key!r}: "
+                f"candidates={[d.id for d in winners]} (tier {max_tier}); wikilinks unresolved"
+            )
+            # Do NOT register in index — wikilinks to this key will be dropped
     return index
 
 
