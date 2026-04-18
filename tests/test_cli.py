@@ -161,3 +161,38 @@ def test_cli_ingest_single_file(tmp_path):
     data_dict = _json.loads((data / "graph.json").read_text())
     node_ids = {n["id"] for n in data_dict["nodes"]}
     assert "only" in node_ids
+
+
+def test_cli_query_finds_node(tmp_path):
+    vault = tmp_path / "vault"
+    data = tmp_path / "data"
+    vault.mkdir()
+    data.mkdir()
+    (vault / "target.md").write_text("# Target\n\nContent about target")
+    (vault / "other.md").write_text("# Other\n\n[[target]]")
+
+    env = os.environ.copy()
+    env["PRISM_VAULT_PATH"] = str(vault)
+    env["PRISM_DATA_DIR"] = str(data)
+    env["PRISM_GEMINI_API_KEY"] = ""
+
+    ingest = subprocess.run(
+        _prism_rag_cmd() + [
+            "ingest",
+            "--vault", str(vault),
+            "--output", str(data),
+            "--no-embedding",
+        ],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert ingest.returncode == 0
+
+    query = subprocess.run(
+        _prism_rag_cmd() + [
+            "query", "target",
+            "--graph", str(data / "graph.json"),
+        ],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert query.returncode == 0
+    assert "target" in query.stdout.lower()
