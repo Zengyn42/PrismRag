@@ -273,6 +273,19 @@ def extract_ast(graph: KnowledgeGraph, docs: list[VaultDocument]) -> None:
         _confidence = fm.get("confidence")
         _actionability = fm.get("actionability")
 
+        _VALID_ONT = {
+            "concept", "entity", "process", "tool", "project",
+            "fact", "decision", "rule", "procedure", "relation",
+            "unclassified",
+        }
+        fm_type = fm.get("type")
+        if fm_type is None:
+            _ont: str | None = None
+        elif fm_type in _VALID_ONT:
+            _ont = fm_type
+        else:
+            _ont = "unclassified"
+
         kind = "knowledge" if doc.frontmatter.get("knowledge_id") else "note"
 
         note = Node(
@@ -287,6 +300,7 @@ def extract_ast(graph: KnowledgeGraph, docs: list[VaultDocument]) -> None:
             maturity=_maturity if _maturity in ("seed", "growing", "mature", "archived") else None,
             confidence=_confidence if _confidence in ("high", "medium", "low") else None,
             actionability=_actionability if _actionability in ("reference", "decision", "task") else None,
+            ontology_type=_ont,
         )
         graph.add_node(note)
 
