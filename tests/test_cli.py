@@ -236,3 +236,44 @@ def test_cli_version():
     )
     assert result.returncode == 0
     assert "PrismRag" in result.stdout
+
+
+def test_cli_incremental_add(tmp_path):
+    vault = tmp_path / "vault"
+    data = tmp_path / "data"
+    vault.mkdir()
+    data.mkdir()
+    (vault / "a.md").write_text("# A")
+
+    env = os.environ.copy()
+    env["PRISM_VAULT_PATH"] = str(vault)
+    env["PRISM_DATA_DIR"] = str(data)
+    env["PRISM_GEMINI_API_KEY"] = ""
+
+    # Initial ingest
+    subprocess.run(
+        _prism_rag_cmd() + [
+            "ingest",
+            "--vault", str(vault),
+            "--output", str(data),
+            "--no-embedding",
+        ],
+        check=True, env=env, timeout=30,
+        capture_output=True,
+    )
+
+    # Add a new file
+    new = vault / "b.md"
+    new.write_text("# B")
+
+    # Incremental add
+    result = subprocess.run(
+        _prism_rag_cmd() + ["add", str(new), "--skip-embed"],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert result.returncode == 0
+    assert (
+        "Added" in result.stdout
+        or "Updated" in result.stdout
+        or "added" in result.stdout.lower()
+    )
