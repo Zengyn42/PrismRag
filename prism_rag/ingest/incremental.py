@@ -20,7 +20,6 @@ import logging
 from pathlib import Path
 
 from prism_rag.config import PrismRagSettings
-from prism_rag.cluster.leiden import run_leiden
 from prism_rag.ingest.ast_extractor import extract_ast
 from prism_rag.ingest.vault_loader import VaultDocument
 from prism_rag.report.graph_report import generate_report
@@ -47,6 +46,7 @@ def _add_single_doc_ast(
     """
     from prism_rag.ingest.ast_extractor import (
         _extract_inline_tags,
+        _extract_relations_edges,
         _extract_wikilinks,
         _tag_node_id,
         _category_node_id,
@@ -56,26 +56,39 @@ def _add_single_doc_ast(
     # Build doc_index from existing graph nodes + all_docs if provided
     doc_index: dict[str, str] = {}
     for nid, data in graph.g.nodes(data=True):
-        if data.get("kind") == "note":
+        if data.get("kind") in ("note", "knowledge"):
             label = data.get("label", "")
             if label:
                 doc_index[label.lower()] = nid
-            # Also index aliases
+            # Also index aliases and knowledge_id
             fm = data.get("frontmatter", {})
             for alias in fm.get("aliases", []):
                 doc_index[str(alias).lower()] = nid
+            kid = fm.get("knowledge_id")
+            if kid:
+                doc_index[str(kid).lower()] = nid
 
     if all_docs:
         for d in all_docs:
             doc_index[d.label.lower()] = d.id
             for alias in d.aliases:
                 doc_index[alias.lower()] = d.id
+            kid = d.frontmatter.get("knowledge_id")
+            if kid:
+                doc_index[str(kid).lower()] = d.id
 
-    # Add note node
+    # Determine node kind: 'knowledge' if knowledge_id frontmatter present, else 'note'
+    kind = "knowledge" if doc.frontmatter.get("knowledge_id") else "note"
+
+    # Also index this doc itself so relations can resolve to it
+    doc_index[doc.label.lower()] = doc.id
+    doc_index[doc.id.lower()] = doc.id
+
+    # Add note/knowledge node
     note = Node(
         id=doc.id,
         label=doc.label,
-        kind="note",
+        kind=kind,
         source_file=str(doc.relative_path),
         content=doc.content,
         content_hash=doc.content_hash,
@@ -114,6 +127,9 @@ def _add_single_doc_ast(
             source=doc.id, target=cid, relation="categorized_as",
             confidence="EXTRACTED", confidence_score=1.0, weight=1.0, source_pass="ast",
         ))
+
+    # Relations frontmatter (Phase 2 explicit typed edges)
+    _extract_relations_edges(graph, doc, doc_index)
 
 
 def ingest_file(
@@ -214,6 +230,7 @@ def ingest_file(
 
     # Leiden re-clustering
     if not skip_leiden:
+        from prism_rag.cluster.leiden import run_leiden
         graph.communities.clear()
         run_leiden(graph, resolution=settings.leiden_resolution, seed=settings.leiden_seed)
 

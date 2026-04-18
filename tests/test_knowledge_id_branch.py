@@ -154,3 +154,49 @@ def test_embed_default_true_knowledge_node(tmp_path):
     embeddable_ids = {node_id for node_id, _ in _get_embeddable_nodes(graph)}
     # KNOW-X is kind=knowledge, no embed: false → should be included
     assert "KNOW-X" in embeddable_ids
+
+
+def test_incremental_ingest_with_knowledge_id(tmp_path):
+    """ingest_file() should correctly handle a file with knowledge_id frontmatter."""
+    from prism_rag.config import PrismRagSettings
+    from prism_rag.ingest.incremental import ingest_file
+    from prism_rag.ingest.ast_extractor import extract_ast
+    from prism_rag.ingest.vault_loader import load_vault as _lv
+    from prism_rag.store.graph import KnowledgeGraph as _KG
+
+    vault = tmp_path / "vault"
+    data = tmp_path / "data"
+    vault.mkdir()
+    data.mkdir()
+
+    # Seed with a base doc
+    (vault / "base.md").write_text("---\nknowledge_id: KNOW-001\n---\n\nBase")
+
+    settings = PrismRagSettings(vault_path=vault, data_dir=data, gemini_api_key="")
+
+    # Full ingest first (no embedding — no API key)
+    g = _KG()
+    extract_ast(g, _lv(vault))
+    g.save(settings.graph_path)
+
+    # Add a new knowledge node with relations
+    new_file = vault / "dep.md"
+    new_file.write_text(
+        "---\n"
+        "knowledge_id: KNOW-042\n"
+        "relations:\n"
+        "  depends_on: [KNOW-001]\n"
+        "---\n\nDepends on base"
+    )
+
+    result = ingest_file(new_file, settings=settings, skip_embed=True, skip_leiden=True)
+    assert result["node_id"] == "KNOW-042"
+    assert result["action"] in ("added", "updated")
+
+    # Reload the persisted graph and verify the edge came through
+    from prism_rag.store.graph import KnowledgeGraph as KG2
+    g2 = KG2.load(settings.graph_path)
+    assert "KNOW-042" in g2.g.nodes
+    assert g2.g.nodes["KNOW-042"]["kind"] == "knowledge"
+    assert g2.g.has_edge("KNOW-042", "KNOW-001")
+    assert g2.g.edges["KNOW-042", "KNOW-001"]["relation"] == "depends_on"
