@@ -318,6 +318,9 @@ def info(
 @app.command()
 def serve(
     transport: str = typer.Option("stdio", "--transport", "-t", help="MCP transport: stdio or sse"),
+    port: int = typer.Option(8102, "--port", "-p", help="Port for SSE transport (ignored for stdio)"),
+    vault_path: Path = typer.Option(None, "--vault", "-v", help="Override PRISM_VAULT_PATH for this server"),
+    data_dir: Path = typer.Option(None, "--data-dir", "-d", help="Override PRISM_DATA_DIR for this server"),
 ) -> None:
     """Start the PrismRag MCP Server.
 
@@ -327,8 +330,17 @@ def serve(
     Exposes tools: search_knowledge, explain_node, trace_path,
     list_communities, explore_community, and vault write tools.
     """
+    import os
+
     from prism_rag.mcp_server.server import run_server
     from prism_rag.store.federated import FederatedGraph
+
+    # Forward CLI overrides into env so PrismRagSettings picks them up;
+    # this covers the case where an MCP manager launches us as a subprocess.
+    if vault_path is not None:
+        os.environ["PRISM_VAULT_PATH"] = str(vault_path.expanduser().resolve())
+    if data_dir is not None:
+        os.environ["PRISM_DATA_DIR"] = str(data_dir.expanduser().resolve())
 
     settings = PrismRagSettings()
     resolved = settings.resolved_graphs
@@ -349,7 +361,7 @@ def serve(
         err=True,
     )
     typer.secho(f"🚀 Starting MCP Server (transport={transport})...", fg=typer.colors.GREEN, err=True)
-    run_server(transport=transport)
+    run_server(transport=transport, port=port)
 
 
 @app.command()

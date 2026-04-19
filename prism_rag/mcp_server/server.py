@@ -521,7 +521,16 @@ register_vault_tools(mcp)
 # -- Server startup ----------------------------------------------------------
 
 
-def run_server(transport: str = "stdio") -> None:
-    """Start the MCP server."""
+def run_server(transport: str = "stdio", port: int = 8102) -> None:
+    """Start the MCP server.
+
+    Args:
+        transport: "stdio" (default, subprocess) or "sse" (HTTP Server-Sent Events).
+        port: TCP port for SSE transport; ignored when transport="stdio".
+    """
     _ensure_federated()  # pre-load
+    if transport == "sse":
+        # FastMCP's SSE host/port are controlled via .settings
+        mcp.settings.port = port
+        mcp.settings.host = "127.0.0.1"
     mcp.run(transport=transport)
