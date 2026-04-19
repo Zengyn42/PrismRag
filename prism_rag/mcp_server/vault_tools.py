@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Union
+import shutil
+from datetime import datetime, timezone
+from typing import List, Optional, Union
 
 from mcp.server.fastmcp import FastMCP
 
@@ -503,6 +505,351 @@ async def _update_frontmatter_impl(
 
 
 # ---------------------------------------------------------------------------
+# Management tool implementations (private, importable for tests)
+# ---------------------------------------------------------------------------
+
+
+async def _move_note_impl(
+    source: str,
+    dest: str,
+    cas_hash: str = "",
+    namespace: str = "",
+) -> str:
+    """Move or rename a note; update graph node if ID changes.
+
+    Returns JSON with source, dest, new_cas_hash, id_changed, and graph_update.
+    """
+    result = _resolve_vault(namespace)
+    if isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False)
+
+    vault, src = result
+    settings = PrismRagSettings()
+
+    src_resolved = vault.resolve_path(source)
+    if isinstance(src_resolved, dict):
+        return json.dumps(src_resolved, ensure_ascii=False)
+
+    dst_resolved = vault.resolve_path(dest)
+    if isinstance(dst_resolved, dict):
+        return json.dumps(dst_resolved, ensure_ascii=False)
+
+    if not src_resolved.exists():
+        return json.dumps(
+            fail(VaultErrorCode.NOT_FOUND, f"File not found: {source}"),
+            ensure_ascii=False,
+        )
+
+    if dst_resolved.exists():
+        return json.dumps(
+            fail(VaultErrorCode.ALREADY_EXISTS, f"Destination already exists: {dest}"),
+            ensure_ascii=False,
+        )
+
+    # Optional CAS check on source
+    if cas_hash:
+        is_valid, actual = verify_cas(src_resolved, cas_hash)
+        if not is_valid:
+            log_operation(
+                tool="move_note",
+                target=source,
+                action="move",
+                status="conflict",
+                cas_before=cas_hash,
+                namespace=src.namespace,
+                actual_hash=actual,
+            )
+            return json.dumps(
+                fail(
+                    VaultErrorCode.CONFLICT,
+                    "CAS conflict: file has been modified.",
+                    expected_hash=cas_hash,
+                    actual_hash=actual,
+                ),
+                ensure_ascii=False,
+            )
+
+    # Compute source node ID BEFORE the move
+    from prism_rag.ingest.vault_loader import VaultDocument
+    vault_root = vault.base_dir
+    src_doc = VaultDocument.from_path(src_resolved, vault_root)
+    source_node_id = src_doc.id
+
+    # Perform the move (cross-device safe)
+    dst_resolved.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src_resolved), str(dst_resolved))
+
+    new_hash = compute_file_hash(dst_resolved)
+
+    # Compute dest node ID AFTER the move
+    dst_doc = VaultDocument.from_path(dst_resolved, vault_root)
+    dest_node_id = dst_doc.id
+
+    id_changed = source_node_id != dest_node_id
+
+    # Graph cleanup: remove stale node if ID changed
+    if id_changed:
+        from prism_rag.store.graph import KnowledgeGraph
+        graph_path = src.graph_path
+        if graph_path.exists():
+            graph = KnowledgeGraph.load(graph_path)
+            if source_node_id in graph.g:
+                graph.g.remove_node(source_node_id)
+                graph.save(graph_path)
+                # Invalidate federated cache
+                try:
+                    import prism_rag.mcp_server.server as _server_mod
+                    _server_mod._federated = None
+                except Exception:
+                    pass
+
+    graph_stats = _sync_graph(dst_resolved, settings, tool_name="move_note")
+
+    log_operation(
+        tool="move_note",
+        target=source,
+        action="move",
+        status="ok",
+        namespace=src.namespace,
+        destination=dest,
+        cas_after=new_hash,
+    )
+
+    return json.dumps(
+        {
+            "status": "ok",
+            "data": {
+                "source": source,
+                "dest": dest,
+                "new_cas_hash": new_hash,
+                "namespace": src.namespace,
+                "id_changed": id_changed,
+            },
+            "graph_update": graph_stats,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+async def _delete_note_impl(
+    path: str,
+    cas_hash: str = "",
+    namespace: str = "",
+) -> str:
+    """Soft-delete a note into <vault>/.trash/; remove it from the graph.
+
+    Returns JSON with path, trash_path, and namespace.
+    """
+    result = _resolve_vault(namespace)
+    if isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False)
+
+    vault, src = result
+
+    resolved = vault.resolve_path(path)
+    if isinstance(resolved, dict):
+        return json.dumps(resolved, ensure_ascii=False)
+
+    if not resolved.exists():
+        return json.dumps(
+            fail(VaultErrorCode.NOT_FOUND, f"File not found: {path}"),
+            ensure_ascii=False,
+        )
+
+    # Optional CAS check
+    if cas_hash:
+        is_valid, actual = verify_cas(resolved, cas_hash)
+        if not is_valid:
+            log_operation(
+                tool="delete_note",
+                target=path,
+                action="delete",
+                status="conflict",
+                cas_before=cas_hash,
+                namespace=src.namespace,
+                actual_hash=actual,
+            )
+            return json.dumps(
+                fail(
+                    VaultErrorCode.CONFLICT,
+                    "CAS conflict: file has been modified.",
+                    expected_hash=cas_hash,
+                    actual_hash=actual,
+                ),
+                ensure_ascii=False,
+            )
+
+    # Compute node ID BEFORE deletion for graph cleanup
+    from prism_rag.ingest.vault_loader import VaultDocument
+    vault_root = vault.base_dir
+    doc = VaultDocument.from_path(resolved, vault_root)
+    node_id = doc.id
+
+    # Soft delete: move to .trash/<relative_path>
+    rel_path = resolved.relative_to(vault_root)
+    trash_root = vault_root / ".trash"
+    trash_dest = trash_root / rel_path
+    trash_dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # Avoid collision in .trash
+    if trash_dest.exists():
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        trash_dest = trash_dest.with_name(
+            f"{trash_dest.stem}_{ts}{trash_dest.suffix}"
+        )
+
+    shutil.move(str(resolved), str(trash_dest))
+    trash_rel = str(trash_dest.relative_to(vault_root))
+
+    # Remove from graph
+    from prism_rag.store.graph import KnowledgeGraph
+    graph_path = src.graph_path
+    if graph_path.exists():
+        graph = KnowledgeGraph.load(graph_path)
+        if node_id in graph.g:
+            graph.g.remove_node(node_id)
+            graph.save(graph_path)
+            try:
+                import prism_rag.mcp_server.server as _server_mod
+                _server_mod._federated = None
+            except Exception:
+                pass
+
+    log_operation(
+        tool="delete_note",
+        target=path,
+        action="trash",
+        status="ok",
+        namespace=src.namespace,
+        trash_path=trash_rel,
+    )
+
+    return json.dumps(
+        {
+            "status": "ok",
+            "data": {
+                "path": path,
+                "trash_path": trash_rel,
+                "namespace": src.namespace,
+            },
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+async def _manage_tags_impl(
+    path: str,
+    add: Optional[List[str]] = None,
+    remove: Optional[List[str]] = None,
+    cas_hash: str = "",
+    namespace: str = "",
+) -> str:
+    """Merge add/remove tag deltas into frontmatter tags; sync graph.
+
+    Only the YAML frontmatter ``tags`` list is modified.  Inline ``#tags`` in
+    the note body are intentionally left untouched.
+
+    Returns JSON with tags_before, tags_after, new cas_hash, and graph_update.
+    """
+    add = list(add) if add else []
+    remove = list(remove) if remove else []
+
+    result = _resolve_vault(namespace)
+    if isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False)
+
+    vault, src = result
+    settings = PrismRagSettings()
+
+    resolved = vault.resolve_path(path)
+    if isinstance(resolved, dict):
+        return json.dumps(resolved, ensure_ascii=False)
+
+    if not resolved.exists():
+        return json.dumps(
+            fail(VaultErrorCode.NOT_FOUND, f"File not found: {path}"),
+            ensure_ascii=False,
+        )
+
+    # Verify CAS before mutating
+    expected = cas_hash if cas_hash else None
+    is_valid, actual = verify_cas(resolved, expected)
+    if not is_valid and expected is not None:
+        log_operation(
+            tool="manage_tags",
+            target=path,
+            action="manage_tags",
+            status="conflict",
+            cas_before=cas_hash,
+            namespace=src.namespace,
+            actual_hash=actual,
+        )
+        return json.dumps(
+            fail(
+                VaultErrorCode.CONFLICT,
+                "CAS conflict: file has been modified.",
+                expected_hash=expected,
+                actual_hash=actual,
+            ),
+            ensure_ascii=False,
+        )
+
+    raw = resolved.read_text(encoding="utf-8")
+    fm, body = parse_frontmatter(raw)
+
+    # Capture before state
+    tags_before = list(fm.get("tags", []) or [])
+    tags = list(tags_before)
+
+    # Normalize and apply add
+    for tag in add:
+        t = tag.lstrip("#").strip()
+        if t and t not in tags:
+            tags.append(t)
+
+    # Normalize and apply remove
+    if remove:
+        remove_set = {r.lstrip("#").strip() for r in remove}
+        tags = [t for t in tags if t not in remove_set]
+
+    fm["tags"] = tags
+    new_content = serialize_frontmatter(fm, body)
+
+    atomic_write(resolved, new_content)
+    new_hash = compute_hash(new_content)
+
+    log_operation(
+        tool="manage_tags",
+        target=path,
+        action="manage_tags",
+        status="ok",
+        cas_before=cas_hash,
+        cas_after=new_hash,
+        namespace=src.namespace,
+    )
+
+    graph_stats = _sync_graph(resolved, settings, tool_name="manage_tags")
+
+    return json.dumps(
+        {
+            "status": "ok",
+            "data": {
+                "path": path,
+                "tags_before": tags_before,
+                "tags_after": tags,
+                "cas_hash": new_hash,
+                "namespace": src.namespace,
+            },
+            "graph_update": graph_stats,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -636,3 +983,84 @@ def register_vault_tools(mcp: FastMCP) -> None:
             JSON with new cas_hash and graph_update stats.
         """
         return await _update_frontmatter_impl(path, updates, cas_hash, namespace)
+
+    @mcp.tool()
+    async def move_note(
+        source: str,
+        dest: str,
+        cas_hash: str = "",
+        namespace: str = "",
+    ) -> str:
+        """Move or rename a note within the vault.
+
+        Atomically renames the file.  After a successful move the knowledge
+        graph is updated: if the node ID changes (no knowledge_id frontmatter)
+        the stale node is removed before re-ingesting the new path; if the node
+        ID is stable (knowledge_id-based) only ``source_file`` is updated.
+
+        Args:
+            source: Current relative path within the vault.
+            dest: Target relative path within the vault (must not already exist).
+            cas_hash: CAS hash of the source file (from read_note). Optional but
+                      recommended to guard against concurrent edits.
+            namespace: Target namespace.
+
+        Returns:
+            JSON with source, dest, new_cas_hash, id_changed, and graph_update.
+        """
+        return await _move_note_impl(source, dest, cas_hash, namespace)
+
+    @mcp.tool()
+    async def delete_note(
+        path: str,
+        cas_hash: str = "",
+        namespace: str = "",
+    ) -> str:
+        """Soft-delete a note by moving it to <vault>/.trash/.
+
+        The node is also removed from the knowledge graph.  The trashed file
+        keeps its original relative path under .trash/ so it can be recovered
+        manually.  If the same file already exists in .trash/, a UTC timestamp
+        suffix is appended to avoid collision.
+
+        Args:
+            path: Relative path within the vault.
+            cas_hash: CAS hash for conflict detection (optional but recommended).
+            namespace: Target namespace.
+
+        Returns:
+            JSON with path, trash_path, and namespace.
+        """
+        return await _delete_note_impl(path, cas_hash, namespace)
+
+    @mcp.tool()
+    async def manage_tags(
+        path: str,
+        add: Optional[List[str]] = None,
+        remove: Optional[List[str]] = None,
+        cas_hash: str = "",
+        namespace: str = "",
+    ) -> str:
+        """Add or remove tags in a note's frontmatter ``tags`` field.
+
+        Only the YAML frontmatter ``tags`` list is modified.  Inline ``#tags``
+        in the note body are intentionally left untouched — they are considered
+        part of the document prose and must be edited manually.
+
+        Tags in the ``add`` list that already exist are silently ignored
+        (deduplication).  Tags in the ``remove`` list that are absent are
+        silently ignored.  Leading ``#`` characters are stripped from all
+        supplied tags before comparison.
+
+        Args:
+            path: Relative path within the vault.
+            add: Tags to add (may include leading ``#``).
+            remove: Tags to remove (may include leading ``#``).
+            cas_hash: CAS hash for conflict detection (from read_note).
+            namespace: Target namespace.
+
+        Returns:
+            JSON with path, tags_before, tags_after, new cas_hash, and
+            graph_update stats.
+        """
+        return await _manage_tags_impl(path, add, remove, cas_hash, namespace)
