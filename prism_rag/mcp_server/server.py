@@ -1,20 +1,32 @@
-"""PrismRag MCP Server — tools for federated knowledge graph queries.
+"""PrismRag MCP Server — unified vault + knowledge-graph tools.
 
-Tools:
-  search_knowledge   BFS/DFS traversal from a query -> related nodes
+Graph query tools (6):
+  search_knowledge   BFS/DFS traversal from a query → related nodes
   explain_node       All info about a specific node + its neighbors
   trace_path         Shortest path between two nodes
   list_communities   Overview of all Leiden communities
   explore_community  Drill into a specific community's members
   list_namespaces    List all loaded knowledge graph namespaces
-  write_note         Write a note to the vault
-  read_note          Read a note from the vault
+
+Vault CRUD tools (11) — ported from ZenithLoom's Obsidian MCP:
+  read_note          Read a note's content + frontmatter + cas_hash
+  list_files         List markdown files under a directory
+  get_frontmatter    Return just the YAML frontmatter of a note
+  write_note         Full-write (create or overwrite) with CAS + atomic + audit
+  patch_note         Replace one heading-delimited section, preserving the rest
+  update_frontmatter Merge changes into frontmatter (other fields untouched)
+  move_note          Rename / relocate a note; graph node re-indexed
+  delete_note        Soft-delete into .trash/; node removed from graph
+  manage_tags        Add/remove frontmatter tags
+  search_files       Keyword search over filename / content
+  get_links          Outgoing and incoming wikilink references
+
+Writes trigger incremental graph sync; conflicts and writes are audited
+to data/audit.jsonl.
 
 Usage:
   prism-rag serve                    # start MCP stdio server
   prism-rag serve --transport sse    # SSE mode (for network access)
-
-The server loads graph(s) from configured sources on startup.
 """
 
 from __future__ import annotations
@@ -500,169 +512,10 @@ def list_namespaces() -> str:
     }, ensure_ascii=False, indent=2)
 
 
-# -- Tool 7: write_note ------------------------------------------------------
+# -- Register ported Obsidian MCP tools (vault_tools.py) ---------------------
 
-
-@mcp.tool()
-def write_note(path: str, content: str, cas_hash: str = "", namespace: str = "") -> str:
-    """Write a note to the vault (create or overwrite).
-
-    After writing, the knowledge graph is automatically updated.
-
-    Args:
-        path: Relative path within the vault (e.g., "design/new_doc.md")
-        content: Full markdown content (including frontmatter if desired)
-        cas_hash: Empty string = create new file (fails if exists).
-                  Non-empty = overwrite (fails if hash doesn't match).
-                  Get cas_hash from read_note first.
-        namespace: Which namespace's vault to write to. Required when multiple
-                   namespaces are loaded; optional when only one.
-
-    Returns:
-        JSON with new cas_hash and graph update stats.
-    """
-    from prism_rag.vault_ops.cas import write_with_cas, CASConflict
-    from prism_rag.vault_ops.errors import VaultErrorCode, fail, ok
-    from prism_rag.vault_ops.vault import Vault
-    from prism_rag.vault_ops.audit_log import log_operation as _audit
-    from prism_rag.ingest.incremental import ingest_file
-
-    settings = PrismRagSettings()
-    sources = {s.namespace: s for s in settings.resolved_graphs}
-
-    if namespace:
-        src = sources.get(namespace)
-        if src is None:
-            return json.dumps({"error": f"Unknown namespace: {namespace!r}"}, ensure_ascii=False)
-    elif len(sources) == 1:
-        src = next(iter(sources.values()))
-    else:
-        return json.dumps({
-            "error": "Multiple namespaces loaded. Specify namespace parameter.",
-            "available": list(sources.keys()),
-        }, ensure_ascii=False)
-
-    vault = Vault(src.vault_path)
-
-    resolved = vault.resolve_path(path)
-    if isinstance(resolved, dict):
-        return json.dumps(resolved, ensure_ascii=False)
-
-    # Atomic CAS write — verify and write are one operation, no TOCTOU window
-    expected = cas_hash if cas_hash else None
-    try:
-        new_hash = write_with_cas(resolved, content, expected_hash=expected)
-    except CASConflict as e:
-        _audit(
-            tool="write_note", target=str(path), action="write",
-            status="conflict",
-            cas_before=str(e.actual),
-            namespace=src.namespace,
-            expected_hash=str(e.expected),
-        )
-        if expected is None:
-            return json.dumps(fail(
-                VaultErrorCode.ALREADY_EXISTS,
-                f"File already exists: {path}. Use read_note to get cas_hash first.",
-                actual_hash=e.actual,
-            ), ensure_ascii=False)
-        return json.dumps(fail(
-            VaultErrorCode.CONFLICT,
-            f"CAS conflict: file has been modified.",
-            expected_hash=e.expected, actual_hash=e.actual,
-        ), ensure_ascii=False)
-
-    _audit(
-        tool="write_note", target=str(path), action="write",
-        status="ok",
-        cas_before=expected or "",
-        cas_after=new_hash,
-        namespace=src.namespace,
-    )
-
-    # Incrementally update graph
-    graph_stats = {}
-    try:
-        graph_stats = ingest_file(
-            resolved, settings=settings, skip_embed=True, skip_persist=False,
-        )
-        # Reload the federated graph
-        global _federated
-        _federated = FederatedGraph.load(settings.resolved_graphs)
-    except Exception as e:
-        logger.warning(f"[write_note] graph update failed: {e}")
-        graph_stats = {"error": str(e)}
-
-    result = {
-        "status": "ok",
-        "data": {"cas_hash": new_hash, "path": path, "namespace": src.namespace},
-        "graph_update": graph_stats,
-    }
-    return json.dumps(result, ensure_ascii=False, indent=2)
-
-
-# -- Tool 8: read_note -------------------------------------------------------
-
-
-@mcp.tool()
-def read_note(path: str, namespace: str = "") -> str:
-    """Read a note's content and cas_hash (needed before writing).
-
-    Args:
-        path: Relative path within the vault (e.g., "design/some_doc.md")
-        namespace: Which namespace's vault to read from. Required when multiple
-                   namespaces are loaded; optional when only one.
-
-    Returns:
-        JSON with content, frontmatter, and cas_hash.
-    """
-    from prism_rag.vault_ops.cas import compute_hash
-    from prism_rag.vault_ops.errors import VaultErrorCode, fail, ok
-    from prism_rag.vault_ops.vault import Vault
-
-    settings = PrismRagSettings()
-    sources = {s.namespace: s for s in settings.resolved_graphs}
-
-    if namespace:
-        src = sources.get(namespace)
-        if src is None:
-            return json.dumps({"error": f"Unknown namespace: {namespace!r}"}, ensure_ascii=False)
-    elif len(sources) == 1:
-        src = next(iter(sources.values()))
-    else:
-        return json.dumps({
-            "error": "Multiple namespaces loaded. Specify namespace parameter.",
-            "available": list(sources.keys()),
-        }, ensure_ascii=False)
-
-    vault = Vault(src.vault_path)
-
-    resolved = vault.resolve_path(path)
-    if isinstance(resolved, dict):
-        return json.dumps(resolved, ensure_ascii=False)
-
-    if not resolved.exists():
-        return json.dumps(fail(VaultErrorCode.NOT_FOUND, f"File not found: {path}"), ensure_ascii=False)
-
-    content = resolved.read_text(encoding="utf-8")
-    cas = compute_hash(content)
-
-    # Parse frontmatter if present
-    try:
-        import frontmatter
-        post = frontmatter.loads(content)
-        fm = dict(post.metadata or {})
-    except Exception:
-        fm = {}
-
-    result = ok(data={
-        "path": path,
-        "namespace": src.namespace,
-        "content": content,
-        "cas_hash": cas,
-        "frontmatter": fm,
-    })
-    return json.dumps(result, ensure_ascii=False, indent=2)
+from prism_rag.mcp_server.vault_tools import register_vault_tools  # noqa: E402
+register_vault_tools(mcp)
 
 
 # -- Server startup ----------------------------------------------------------
