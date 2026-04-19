@@ -500,105 +500,27 @@ def list_namespaces() -> str:
     }, ensure_ascii=False, indent=2)
 
 
-# -- Tool 7: write_note ------------------------------------------------------
+# -- Tool 7: write_note (moved to vault_tools.py — removed in Task 5) --------
 
-
-@mcp.tool()
-def write_note(path: str, content: str, cas_hash: str = "", namespace: str = "") -> str:
-    """Write a note to the vault (create or overwrite).
-
-    After writing, the knowledge graph is automatically updated.
-
-    Args:
-        path: Relative path within the vault (e.g., "design/new_doc.md")
-        content: Full markdown content (including frontmatter if desired)
-        cas_hash: Empty string = create new file (fails if exists).
-                  Non-empty = overwrite (fails if hash doesn't match).
-                  Get cas_hash from read_note first.
-        namespace: Which namespace's vault to write to. Required when multiple
-                   namespaces are loaded; optional when only one.
-
-    Returns:
-        JSON with new cas_hash and graph update stats.
-    """
-    from prism_rag.vault_ops.cas import write_with_cas, CASConflict
-    from prism_rag.vault_ops.errors import VaultErrorCode, fail, ok
-    from prism_rag.vault_ops.vault import Vault
-    from prism_rag.vault_ops.audit_log import log_operation as _audit
-    from prism_rag.ingest.incremental import ingest_file
-
-    settings = PrismRagSettings()
-    sources = {s.namespace: s for s in settings.resolved_graphs}
-
-    if namespace:
-        src = sources.get(namespace)
-        if src is None:
-            return json.dumps({"error": f"Unknown namespace: {namespace!r}"}, ensure_ascii=False)
-    elif len(sources) == 1:
-        src = next(iter(sources.values()))
-    else:
-        return json.dumps({
-            "error": "Multiple namespaces loaded. Specify namespace parameter.",
-            "available": list(sources.keys()),
-        }, ensure_ascii=False)
-
-    vault = Vault(src.vault_path)
-
-    resolved = vault.resolve_path(path)
-    if isinstance(resolved, dict):
-        return json.dumps(resolved, ensure_ascii=False)
-
-    # Atomic CAS write — verify and write are one operation, no TOCTOU window
-    expected = cas_hash if cas_hash else None
-    try:
-        new_hash = write_with_cas(resolved, content, expected_hash=expected)
-    except CASConflict as e:
-        _audit(
-            tool="write_note", target=str(path), action="write",
-            status="conflict",
-            cas_before=str(e.actual),
-            namespace=src.namespace,
-            expected_hash=str(e.expected),
-        )
-        if expected is None:
-            return json.dumps(fail(
-                VaultErrorCode.ALREADY_EXISTS,
-                f"File already exists: {path}. Use read_note to get cas_hash first.",
-                actual_hash=e.actual,
-            ), ensure_ascii=False)
-        return json.dumps(fail(
-            VaultErrorCode.CONFLICT,
-            f"CAS conflict: file has been modified.",
-            expected_hash=e.expected, actual_hash=e.actual,
-        ), ensure_ascii=False)
-
-    _audit(
-        tool="write_note", target=str(path), action="write",
-        status="ok",
-        cas_before=expected or "",
-        cas_after=new_hash,
-        namespace=src.namespace,
-    )
-
-    # Incrementally update graph
-    graph_stats = {}
-    try:
-        graph_stats = ingest_file(
-            resolved, settings=settings, skip_embed=True, skip_persist=False,
-        )
-        # Reload the federated graph
-        global _federated
-        _federated = FederatedGraph.load(settings.resolved_graphs)
-    except Exception as e:
-        logger.warning(f"[write_note] graph update failed: {e}")
-        graph_stats = {"error": str(e)}
-
-    result = {
-        "status": "ok",
-        "data": {"cas_hash": new_hash, "path": path, "namespace": src.namespace},
-        "graph_update": graph_stats,
-    }
-    return json.dumps(result, ensure_ascii=False, indent=2)
+# @mcp.tool()
+# def write_note(path: str, content: str, cas_hash: str = "", namespace: str = "") -> str:
+#     """Write a note to the vault (create or overwrite).
+#
+#     After writing, the knowledge graph is automatically updated.
+#
+#     Args:
+#         path: Relative path within the vault (e.g., "design/new_doc.md")
+#         content: Full markdown content (including frontmatter if desired)
+#         cas_hash: Empty string = create new file (fails if exists).
+#                   Non-empty = overwrite (fails if hash doesn't match).
+#                   Get cas_hash from read_note first.
+#         namespace: Which namespace's vault to write to. Required when multiple
+#                    namespaces are loaded; optional when only one.
+#
+#     Returns:
+#         JSON with new cas_hash and graph update stats.
+#     """
+#     ... (implementation moved to vault_tools._write_note_impl)
 
 
 # -- Tool 8: read_note (moved to vault_tools.py — remove this block in Task 5)

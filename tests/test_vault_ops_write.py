@@ -75,10 +75,10 @@ def test_audit_log_appends_jsonl(tmp_path, monkeypatch):
     assert "T" in r1["ts"]
 
 
-def test_write_note_logs_audit_on_success(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_write_note_logs_audit_on_success(tmp_path, monkeypatch):
     """Successful write_note produces audit entry with status='ok'."""
     from prism_rag.config import PrismRagSettings, GraphSource
-    from prism_rag.mcp_server import server as mcp_server
     from prism_rag.vault_ops import audit_log as al
 
     vault = tmp_path / "vault"
@@ -97,17 +97,23 @@ def test_write_note_logs_audit_on_success(tmp_path, monkeypatch):
         graphs=[GraphSource(namespace="default", vault_path=vault, data_dir=data, writable=True)],
     )
     monkeypatch.setattr(
-        "prism_rag.mcp_server.server.PrismRagSettings",
+        "prism_rag.mcp_server.vault_tools.PrismRagSettings",
         lambda: settings,
     )
-    mcp_server._federated = None
 
-    result = mcp_server.write_note(
-        path="new.md",
-        content="# Hello",
-        cas_hash="",
-        namespace="default",
-    )
+    from unittest.mock import patch
+
+    def _stub_sync(path, settings, tool_name):
+        return {"node_id": "new", "action": "added"}
+
+    from prism_rag.mcp_server.vault_tools import _write_note_impl
+    with patch("prism_rag.mcp_server.vault_tools._sync_graph", side_effect=_stub_sync):
+        result = await _write_note_impl(
+            path="new.md",
+            content="# Hello",
+            cas_hash="",
+            namespace="default",
+        )
     parsed = json.loads(result)
     assert parsed.get("status") == "ok"
 
@@ -116,10 +122,10 @@ def test_write_note_logs_audit_on_success(tmp_path, monkeypatch):
     assert any(e["tool"] == "write_note" and e["status"] == "ok" for e in entries)
 
 
-def test_write_note_cas_conflict_logs_audit(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_write_note_cas_conflict_logs_audit(tmp_path, monkeypatch):
     """CAS conflict produces audit entry with status='conflict'."""
     from prism_rag.config import PrismRagSettings, GraphSource
-    from prism_rag.mcp_server import server as mcp_server
     from prism_rag.vault_ops import audit_log as al
 
     vault = tmp_path / "vault"
@@ -138,12 +144,12 @@ def test_write_note_cas_conflict_logs_audit(tmp_path, monkeypatch):
         graphs=[GraphSource(namespace="default", vault_path=vault, data_dir=data, writable=True)],
     )
     monkeypatch.setattr(
-        "prism_rag.mcp_server.server.PrismRagSettings",
+        "prism_rag.mcp_server.vault_tools.PrismRagSettings",
         lambda: settings,
     )
-    mcp_server._federated = None
 
-    result = mcp_server.write_note(
+    from prism_rag.mcp_server.vault_tools import _write_note_impl
+    result = await _write_note_impl(
         path="existing.md",
         content="v2",
         cas_hash="sha256:wronghash",
