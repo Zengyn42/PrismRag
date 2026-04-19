@@ -1,20 +1,32 @@
-"""PrismRag MCP Server — tools for federated knowledge graph queries.
+"""PrismRag MCP Server — unified vault + knowledge-graph tools.
 
-Tools:
-  search_knowledge   BFS/DFS traversal from a query -> related nodes
+Graph query tools (6):
+  search_knowledge   BFS/DFS traversal from a query → related nodes
   explain_node       All info about a specific node + its neighbors
   trace_path         Shortest path between two nodes
   list_communities   Overview of all Leiden communities
   explore_community  Drill into a specific community's members
   list_namespaces    List all loaded knowledge graph namespaces
-  write_note         Write a note to the vault
-  read_note          Read a note from the vault
+
+Vault CRUD tools (11) — ported from ZenithLoom's Obsidian MCP:
+  read_note          Read a note's content + frontmatter + cas_hash
+  list_files         List markdown files under a directory
+  get_frontmatter    Return just the YAML frontmatter of a note
+  write_note         Full-write (create or overwrite) with CAS + atomic + audit
+  patch_note         Replace one heading-delimited section, preserving the rest
+  update_frontmatter Merge changes into frontmatter (other fields untouched)
+  move_note          Rename / relocate a note; graph node re-indexed
+  delete_note        Soft-delete into .trash/; node removed from graph
+  manage_tags        Add/remove frontmatter tags
+  search_files       Keyword search over filename / content
+  get_links          Outgoing and incoming wikilink references
+
+Writes trigger incremental graph sync; conflicts and writes are audited
+to data/audit.jsonl.
 
 Usage:
   prism-rag serve                    # start MCP stdio server
   prism-rag serve --transport sse    # SSE mode (for network access)
-
-The server loads graph(s) from configured sources on startup.
 """
 
 from __future__ import annotations
@@ -500,40 +512,7 @@ def list_namespaces() -> str:
     }, ensure_ascii=False, indent=2)
 
 
-# -- Tool 7: write_note (moved to vault_tools.py — removed in Task 5) --------
-
-# @mcp.tool()
-# def write_note(path: str, content: str, cas_hash: str = "", namespace: str = "") -> str:
-#     """Write a note to the vault (create or overwrite).
-#
-#     After writing, the knowledge graph is automatically updated.
-#
-#     Args:
-#         path: Relative path within the vault (e.g., "design/new_doc.md")
-#         content: Full markdown content (including frontmatter if desired)
-#         cas_hash: Empty string = create new file (fails if exists).
-#                   Non-empty = overwrite (fails if hash doesn't match).
-#                   Get cas_hash from read_note first.
-#         namespace: Which namespace's vault to write to. Required when multiple
-#                    namespaces are loaded; optional when only one.
-#
-#     Returns:
-#         JSON with new cas_hash and graph update stats.
-#     """
-#     ... (implementation moved to vault_tools._write_note_impl)
-
-
-# -- Tool 8: read_note (moved to vault_tools.py — remove this block in Task 5)
-# The implementation below is commented out; the replacement registered via
-# register_vault_tools() in vault_tools.py is now canonical.
-
-# @mcp.tool()
-# def read_note(path: str, namespace: str = "") -> str:
-#     """Read a note's content and cas_hash (needed before writing)."""
-#     ...  # (original body kept for reference in git history)
-
-
-# -- Register ported Obsidian MCP tools (Step 2) -----------------------------
+# -- Register ported Obsidian MCP tools (vault_tools.py) ---------------------
 
 from prism_rag.mcp_server.vault_tools import register_vault_tools  # noqa: E402
 register_vault_tools(mcp)
