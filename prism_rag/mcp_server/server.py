@@ -601,68 +601,20 @@ def write_note(path: str, content: str, cas_hash: str = "", namespace: str = "")
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-# -- Tool 8: read_note -------------------------------------------------------
+# -- Tool 8: read_note (moved to vault_tools.py — remove this block in Task 5)
+# The implementation below is commented out; the replacement registered via
+# register_vault_tools() in vault_tools.py is now canonical.
+
+# @mcp.tool()
+# def read_note(path: str, namespace: str = "") -> str:
+#     """Read a note's content and cas_hash (needed before writing)."""
+#     ...  # (original body kept for reference in git history)
 
 
-@mcp.tool()
-def read_note(path: str, namespace: str = "") -> str:
-    """Read a note's content and cas_hash (needed before writing).
+# -- Register ported Obsidian MCP tools (Step 2) -----------------------------
 
-    Args:
-        path: Relative path within the vault (e.g., "design/some_doc.md")
-        namespace: Which namespace's vault to read from. Required when multiple
-                   namespaces are loaded; optional when only one.
-
-    Returns:
-        JSON with content, frontmatter, and cas_hash.
-    """
-    from prism_rag.vault_ops.cas import compute_hash
-    from prism_rag.vault_ops.errors import VaultErrorCode, fail, ok
-    from prism_rag.vault_ops.vault import Vault
-
-    settings = PrismRagSettings()
-    sources = {s.namespace: s for s in settings.resolved_graphs}
-
-    if namespace:
-        src = sources.get(namespace)
-        if src is None:
-            return json.dumps({"error": f"Unknown namespace: {namespace!r}"}, ensure_ascii=False)
-    elif len(sources) == 1:
-        src = next(iter(sources.values()))
-    else:
-        return json.dumps({
-            "error": "Multiple namespaces loaded. Specify namespace parameter.",
-            "available": list(sources.keys()),
-        }, ensure_ascii=False)
-
-    vault = Vault(src.vault_path)
-
-    resolved = vault.resolve_path(path)
-    if isinstance(resolved, dict):
-        return json.dumps(resolved, ensure_ascii=False)
-
-    if not resolved.exists():
-        return json.dumps(fail(VaultErrorCode.NOT_FOUND, f"File not found: {path}"), ensure_ascii=False)
-
-    content = resolved.read_text(encoding="utf-8")
-    cas = compute_hash(content)
-
-    # Parse frontmatter if present
-    try:
-        import frontmatter
-        post = frontmatter.loads(content)
-        fm = dict(post.metadata or {})
-    except Exception:
-        fm = {}
-
-    result = ok(data={
-        "path": path,
-        "namespace": src.namespace,
-        "content": content,
-        "cas_hash": cas,
-        "frontmatter": fm,
-    })
-    return json.dumps(result, ensure_ascii=False, indent=2)
+from prism_rag.mcp_server.vault_tools import register_vault_tools  # noqa: E402
+register_vault_tools(mcp)
 
 
 # -- Server startup ----------------------------------------------------------
