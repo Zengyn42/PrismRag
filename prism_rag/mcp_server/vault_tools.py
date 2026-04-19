@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 from datetime import datetime, timezone
 from typing import List, Optional, Union
@@ -850,6 +851,210 @@ async def _manage_tags_impl(
 
 
 # ---------------------------------------------------------------------------
+# Search tool implementations (private, importable for tests)
+# ---------------------------------------------------------------------------
+
+# Wikilink regex — mirrors prism_rag.ingest.ast_extractor._WIKILINK_RE
+_WIKILINK_RE = re.compile(
+    r"""
+    (?P<embed>!)?                       # optional ! for embed
+    \[\[                                # opening [[
+    (?P<target>[^\]\|#\^]+)             # target name (no ] | # ^)
+    (?:\#(?P<section>[^\]\|\^]+))?      # optional #section
+    (?:\^(?P<block>[^\]\|]+))?          # optional ^block-id
+    (?:\|[^\]]+)?                       # optional |display (ignored)
+    \]\]                                # closing ]]
+    """,
+    re.VERBOSE,
+)
+
+
+def _raw_wikilinks(content: str) -> list[str]:
+    """Return list of raw target strings from wikilinks in *content*."""
+    targets = []
+    for m in _WIKILINK_RE.finditer(content):
+        target = m.group("target").strip()
+        if target:
+            targets.append(target)
+    return targets
+
+
+async def _search_files_impl(
+    query: str,
+    directory: str = "",
+    case_sensitive: bool = False,
+    filename_only: bool = False,
+    max_results: int = 50,
+    namespace: str = "",
+) -> str:
+    """Keyword search across vault filenames and (optionally) note content.
+
+    Returns JSON with matches list, count, and a truncated flag.
+    Each match entry: {path, line_hits: [{line_number, line_text}], filename_match}.
+    When filename_only=True, line_hits is always [].
+    """
+    if not query.strip():
+        return json.dumps(
+            fail(VaultErrorCode.VALIDATION_ERROR, "query must not be empty"),
+            ensure_ascii=False,
+        )
+
+    result = _resolve_vault(namespace)
+    if isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False)
+    vault, src = result
+
+    base = vault.resolve_dir(directory)
+    if isinstance(base, dict):
+        return json.dumps(base, ensure_ascii=False)
+
+    if not base.exists():
+        return json.dumps(
+            fail(VaultErrorCode.NOT_FOUND, f"Directory not found: {directory or '/'}"),
+            ensure_ascii=False,
+        )
+
+    q_cmp = query if case_sensitive else query.lower()
+    pattern = re.compile(re.escape(query), 0 if case_sensitive else re.IGNORECASE)
+
+    matches: list[dict] = []
+    truncated = False
+
+    for p in sorted(base.rglob("*.md")):
+        if not p.is_file() or not vault.is_note(p):
+            continue
+
+        rel = vault.relative_path(p)
+
+        # --- filename check ---
+        fname = p.name if case_sensitive else p.name.lower()
+        fname_match = q_cmp in fname
+
+        if filename_only:
+            if fname_match:
+                matches.append({
+                    "path": rel,
+                    "filename_match": True,
+                    "line_hits": [],
+                })
+            if len(matches) >= max_results:
+                # Check if more files exist to set truncated properly
+                # We detect truncation by trying to continue the loop
+                truncated = True
+                break
+            continue
+
+        # --- content check (also covers filename match) ---
+        line_hits: list[dict] = []
+        if not fname_match:
+            try:
+                content = p.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            for i, line in enumerate(content.split("\n"), 1):
+                if pattern.search(line):
+                    line_hits.append({
+                        "line_number": i,
+                        "line_text": line.strip()[:200],
+                    })
+            if not line_hits:
+                continue
+        # fname matched — content check skipped; line_hits remains []
+
+        matches.append({
+            "path": rel,
+            "filename_match": fname_match,
+            "line_hits": line_hits,
+        })
+
+        if len(matches) >= max_results:
+            truncated = True
+            break
+
+    return json.dumps(
+        ok(data={
+            "matches": matches,
+            "count": len(matches),
+            "truncated": truncated,
+        }),
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+async def _get_links_impl(path: str, namespace: str = "") -> str:
+    """Return outgoing wikilinks from a note and incoming links from the vault.
+
+    Outgoing links are extracted by scanning the file's raw text for [[...]]
+    syntax.  Incoming links are found by walking the entire vault and checking
+    which files reference this note's stem.
+
+    # TODO: when vault scale demands it, replace the incoming-link scan with a
+    #       graph-backed lookup using the precomputed backlinks already stored
+    #       as edges in PrismRag's KnowledgeGraph (graph.g predecessors keyed
+    #       by node ID).  The current O(N) full-vault scan is acceptable for
+    #       vaults up to ~hundreds of files.
+    """
+    result = _resolve_vault(namespace)
+    if isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False)
+    vault, src = result
+
+    resolved = vault.resolve_path(path)
+    if isinstance(resolved, dict):
+        return json.dumps(resolved, ensure_ascii=False)
+
+    if not resolved.exists():
+        return json.dumps(
+            fail(VaultErrorCode.NOT_FOUND, f"File not found: {path}"),
+            ensure_ascii=False,
+        )
+
+    if not resolved.is_file():
+        return json.dumps(
+            fail(VaultErrorCode.VALIDATION_ERROR, f"Not a file: {path}"),
+            ensure_ascii=False,
+        )
+
+    # Outgoing links
+    content = resolved.read_text(encoding="utf-8")
+    outgoing = _raw_wikilinks(content)
+
+    # Incoming links: scan every other .md file in the vault
+    note_stem = resolved.stem  # filename without .md
+    note_rel = vault.relative_path(resolved).removesuffix(".md")  # e.g. "folder/note"
+    incoming: list[str] = []
+
+    for p in sorted(vault.base_dir.rglob("*.md")):
+        if p == resolved or not p.is_file():
+            continue
+        try:
+            other_content = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        other_links = _raw_wikilinks(other_content)
+        for link in other_links:
+            link = link.strip()
+            # wikilink may be bare "note" or "folder/note"
+            link_stem = link.split("/")[-1]
+            if link_stem == note_stem or link == note_rel:
+                incoming.append(vault.relative_path(p))
+                break  # count each referencing file once
+
+    return json.dumps(
+        ok(data={
+            "path": path,
+            "outgoing": outgoing,
+            "incoming": incoming,
+            "namespace": src.namespace,
+        }),
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -1064,3 +1269,59 @@ def register_vault_tools(mcp: FastMCP) -> None:
             graph_update stats.
         """
         return await _manage_tags_impl(path, add, remove, cas_hash, namespace)
+
+    @mcp.tool()
+    async def search_files(
+        query: str,
+        directory: str = "",
+        case_sensitive: bool = False,
+        filename_only: bool = False,
+        max_results: int = 50,
+        namespace: str = "",
+    ) -> str:
+        """Search vault notes by keyword (filename and/or content).
+
+        Scans every ``.md`` file under the given directory (default: vault
+        root), checking the filename and — unless ``filename_only`` is True —
+        the full file content for the supplied keyword.
+
+        Args:
+            query: Search keyword (non-empty).
+            directory: Relative directory to scope the search (empty = vault
+                       root).
+            case_sensitive: When False (default), search is case-insensitive.
+            filename_only: When True, only filenames are checked; file content
+                           is not read.
+            max_results: Maximum number of matching files to return (default 50).
+                         When capped, ``truncated`` is True in the response.
+            namespace: Target namespace.
+
+        Returns:
+            JSON with matches list (path, filename_match, line_hits), count,
+            and truncated flag.
+        """
+        return await _search_files_impl(
+            query, directory, case_sensitive, filename_only, max_results, namespace
+        )
+
+    @mcp.tool()
+    async def get_links(path: str, namespace: str = "") -> str:
+        """Return the outgoing and incoming wikilinks for a vault note.
+
+        Outgoing links are [[wikilinks]] found in the note's raw text.
+        Incoming links are discovered by scanning the whole vault for files
+        that reference this note's stem (``[[note_stem]]``).
+
+        Note: the incoming-link scan walks every ``.md`` file in the vault on
+        each call (O(N)).  Acceptable for small vaults; for large vaults
+        consider using the graph's precomputed backlinks instead.
+
+        Args:
+            path: Relative path to the note within the vault.
+            namespace: Target namespace.
+
+        Returns:
+            JSON with path, outgoing (list of wikilink targets), incoming
+            (list of relative paths that reference this note), and namespace.
+        """
+        return await _get_links_impl(path, namespace)
