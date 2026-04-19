@@ -54,7 +54,14 @@ class VaultDocument:
 
     @property
     def id(self) -> str:
-        """Stable node ID: relative path without .md extension, POSIX-style."""
+        """Stable node ID.
+
+        If frontmatter declares a knowledge_id (Phase 2 atomic node), use it.
+        Otherwise fall back to relative path without .md extension, POSIX-style.
+        """
+        kid = self.frontmatter.get("knowledge_id")
+        if kid:
+            return str(kid)
         return self.relative_path.with_suffix("").as_posix()
 
     @property
@@ -87,6 +94,52 @@ class VaultDocument:
         return str(cat) if cat else None
 
 
+@dataclass
+class VaultMedia:
+    """A non-markdown vault file (PDF, image, audio)."""
+
+    path: Path
+    vault_root: Path
+    kind: str  # "pdf" | "image" | "audio" | "unknown"
+    content_hash: str = ""
+
+    @classmethod
+    def from_path(cls, path: Path, vault_root: Path) -> "VaultMedia":
+        ext = path.suffix.lower()
+        if ext == ".pdf":
+            kind = "pdf"
+        elif ext in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            kind = "image"
+        elif ext in {".mp3", ".wav", ".m4a", ".ogg", ".flac"}:
+            kind = "audio"
+        else:
+            kind = "unknown"
+        hash_hex = hashlib.sha256(path.read_bytes()).hexdigest()
+        return cls(
+            path=path,
+            vault_root=vault_root,
+            kind=kind,
+            content_hash=f"sha256:{hash_hex}",
+        )
+
+    @property
+    def relative_path(self) -> Path:
+        return self.path.relative_to(self.vault_root)
+
+    @property
+    def id(self) -> str:
+        """Stable ID: relative path without extension, POSIX-style."""
+        return self.relative_path.with_suffix("").as_posix()
+
+    @property
+    def label(self) -> str:
+        return self.path.stem
+
+
+# Supported media extensions (MVP = PDF only; image/audio are stubs).
+_MEDIA_EXTENSIONS: frozenset[str] = frozenset({".pdf"})
+
+
 def discover_markdown_files(
     vault_root: Path,
     exclude_dirs: frozenset[str] = _DEFAULT_EXCLUDE_DIRS,
@@ -103,6 +156,33 @@ def discover_markdown_files(
     results: list[Path] = []
     for path in vault_root.rglob("*.md"):
         # Skip if any ancestor directory is excluded
+        rel_parts = path.relative_to(vault_root).parts
+        if any(part in exclude_dirs for part in rel_parts):
+            continue
+        results.append(path)
+    return sorted(results)
+
+
+def discover_vault_files(
+    vault_root: Path,
+    exclude_dirs: frozenset[str] = _DEFAULT_EXCLUDE_DIRS,
+) -> list[Path]:
+    """Recursively find .md and supported media files under vault_root.
+
+    Like discover_markdown_files, but includes PDF (and in the future, images/audio).
+    """
+    if not vault_root.exists():
+        raise FileNotFoundError(f"Vault root does not exist: {vault_root}")
+    if not vault_root.is_dir():
+        raise NotADirectoryError(f"Vault root is not a directory: {vault_root}")
+
+    results: list[Path] = []
+    all_extensions = {".md"} | _MEDIA_EXTENSIONS
+    for path in vault_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in all_extensions:
+            continue
         rel_parts = path.relative_to(vault_root).parts
         if any(part in exclude_dirs for part in rel_parts):
             continue

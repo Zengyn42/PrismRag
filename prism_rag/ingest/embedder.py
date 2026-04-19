@@ -48,15 +48,23 @@ def _truncate(text: str, max_chars: int = _MAX_INPUT_CHARS) -> str:
 def _get_embeddable_nodes(graph: KnowledgeGraph) -> list[tuple[str, str]]:
     """Extract (node_id, content) pairs for all nodes worth embedding.
 
-    Only embeds nodes with actual content (notes). Tags and categories
-    are structural nodes with no semantic content to embed.
+    Rules:
+      - Kind must be content-bearing: note, knowledge, image, pdf, audio
+      - Content must be non-empty (after strip)
+      - Frontmatter.embed == False opts out (Phase 2 tiered embedding)
     """
     pairs: list[tuple[str, str]] = []
     for node_id, data in graph.g.nodes(data=True):
         kind = data.get("kind", "")
         content = data.get("content", "")
-        if kind in ("note", "image", "pdf", "audio") and content.strip():
-            pairs.append((node_id, content))
+        if kind not in ("note", "knowledge", "image", "pdf", "audio"):
+            continue
+        if not content.strip():
+            continue
+        fm = data.get("frontmatter") or {}
+        if fm.get("embed") is False:
+            continue
+        pairs.append((node_id, content))
     return pairs
 
 

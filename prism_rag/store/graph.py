@@ -48,7 +48,7 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 Confidence = Literal["EXTRACTED", "INFERRED", "AMBIGUOUS"]
-NodeKind = Literal["note", "tag", "category", "image", "pdf", "audio", "section", "block"]
+NodeKind = Literal["note", "knowledge", "tag", "category", "image", "pdf", "audio", "section", "block"]
 SourcePass = Literal["ast", "media", "embedding", "llm"]
 
 # ── Six-space Am attributes (K-space attribute dimension) ─────────────────
@@ -59,6 +59,13 @@ SourcePass = Literal["ast", "media", "embedding", "llm"]
 Maturity = Literal["seed", "growing", "mature", "archived"]
 ConfidenceLevel = Literal["high", "medium", "low"]
 Actionability = Literal["reference", "decision", "task"]
+
+# ── Ontology type (Vault Phase 2 — K-space semantic classification) ───────────
+OntologyType = Literal[
+    "concept", "entity", "process", "tool", "project",
+    "fact", "decision", "rule", "procedure", "relation",
+    "unclassified",
+]
 
 
 @dataclass
@@ -79,6 +86,9 @@ class Node:
     maturity: Maturity | None = None          # knowledge maturity: seed → growing → mature → archived
     confidence: ConfidenceLevel | None = None  # source reliability: high / medium / low
     actionability: Actionability | None = None # actionability type: reference / decision / task
+
+    # Semantic ontology type (Vault Phase 2). Populated from frontmatter.type.
+    ontology_type: OntologyType | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

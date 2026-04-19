@@ -54,11 +54,17 @@ def ingest(
     skip_cluster: bool = typer.Option(False, "--skip-cluster"),
     skip_report: bool = typer.Option(False, "--skip-report"),
     skip_embed: bool = typer.Option(False, "--skip-embed", help="Skip Pass 3 embedding + similarity edges"),
+    no_embedding: bool = typer.Option(
+        False, "--no-embedding",
+        help="Alias for --skip-embed; skip Pass 3 entirely (for offline testing)",
+    ),
 ) -> None:
     """Build the knowledge graph from the vault.
 
     Pipeline: Pass 1 (AST) → Pass 3 (Embedding) → Pass 4 (Leiden) → Pass 5 (Persist + Report)
     """
+    skip_embed = skip_embed or no_embedding
+
     if namespace and output is not None:
         output = output / namespace
     elif namespace:
@@ -90,6 +96,19 @@ def ingest(
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
     typer.echo(f"   Nodes: {graph.node_count} · Edges: {graph.edge_count}")
+
+    # ── Pass 2: Media extraction ──
+    from prism_rag.ingest.media_extractor import add_media_nodes
+    from prism_rag.ingest.vault_loader import VaultMedia, discover_vault_files
+
+    typer.secho("\n📄 Pass 2: Extracting PDF content...", fg=typer.colors.BLUE)
+    media_paths = [
+        p for p in discover_vault_files(settings.vault_path)
+        if p.suffix.lower() == ".pdf"
+    ]
+    media = [VaultMedia.from_path(p, settings.vault_path) for p in media_paths]
+    n_media = add_media_nodes(graph, media)
+    typer.echo(f"   PDF nodes: {n_media}")
 
     # ── Pass 3: Embedding + similarity edges ──
     if skip_embed:

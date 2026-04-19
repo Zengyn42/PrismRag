@@ -21,11 +21,14 @@ false positives (e.g., `#include` in C code).
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterable
 
 from prism_rag.ingest.vault_loader import VaultDocument
 from prism_rag.store.graph import Edge, KnowledgeGraph, Node
+
+logger = logging.getLogger(__name__)
 
 # ── Regex patterns ───────────────────────────────────────────────────
 
@@ -90,18 +93,85 @@ def _extract_inline_tags(text: str) -> set[str]:
     return {match.group(1) for match in _TAG_RE.finditer(cleaned)}
 
 
-def _build_doc_index(docs: Iterable[VaultDocument]) -> dict[str, str]:
-    """Build a case-insensitive index mapping display names/aliases → canonical node IDs.
+def _priority_tier(doc: VaultDocument) -> int:
+    """Return collision-resolution priority (higher wins).
 
-    Obsidian wikilinks use either the filename stem or a frontmatter alias.
+    Tier 3: has knowledge_id
+    Tier 2: canonical: true in frontmatter
+    Tier 1: lives under knowledge/ directory
+    Tier 0: everything else
     """
-    index: dict[str, str] = {}
-    for doc in docs:
-        # Primary: filename stem
-        index[doc.label.lower()] = doc.id
-        # Aliases from frontmatter
+    if doc.frontmatter.get("knowledge_id"):
+        return 3
+    if doc.frontmatter.get("canonical") is True:
+        return 2
+    try:
+        parts = doc.relative_path.parts
+    except AttributeError:
+        parts = ()
+    if "knowledge" in parts:
+        return 1
+    return 0
+
+
+def _build_doc_index(docs: Iterable[VaultDocument]) -> dict[str, str]:
+    """Build lowercase name → canonical doc.id lookup with tiered collision resolution.
+
+    On collision:
+      - Higher-priority tier wins
+      - Same-tier collision → key NOT registered (wikilinks to it fail resolution)
+      - Always log a warning on collision (regardless of outcome)
+
+    Keys registered per doc: filename stem (lowercased), aliases (lowercased),
+    knowledge_id (lowercased) if present.
+    """
+    docs_list = list(docs)
+    candidates: dict[str, list[VaultDocument]] = {}
+
+    def _register(key: str, doc: VaultDocument) -> None:
+        candidates.setdefault(key.lower(), []).append(doc)
+
+    for doc in docs_list:
+        _register(doc.label, doc)
         for alias in doc.aliases:
-            index[alias.lower()] = doc.id
+            _register(alias, doc)
+        kid = doc.frontmatter.get("knowledge_id")
+        if kid:
+            _register(str(kid), doc)
+
+    index: dict[str, str] = {}
+    for key, cands in candidates.items():
+        # Deduplicate: the same doc might register under multiple names (label + alias + kid)
+        # but we only treat as collision when DIFFERENT docs compete for the same key
+        unique_docs: list[VaultDocument] = []
+        seen_ids: set[str] = set()
+        for d in cands:
+            if d.id not in seen_ids:
+                unique_docs.append(d)
+                seen_ids.add(d.id)
+
+        if len(unique_docs) == 1:
+            index[key] = unique_docs[0].id
+            continue
+
+        by_tier: dict[int, list[VaultDocument]] = {}
+        for d in unique_docs:
+            by_tier.setdefault(_priority_tier(d), []).append(d)
+        max_tier = max(by_tier.keys())
+        winners = by_tier[max_tier]
+
+        if len(winners) == 1:
+            logger.warning(
+                f"[ast_extractor] collision on key {key!r}: winner={winners[0].id} "
+                f"(tier {max_tier}), others={[d.id for d in unique_docs if d.id != winners[0].id]}"
+            )
+            index[key] = winners[0].id
+        else:
+            logger.warning(
+                f"[ast_extractor] AMBIGUOUS collision on key {key!r}: "
+                f"candidates={[d.id for d in winners]} (tier {max_tier}); wikilinks unresolved"
+            )
+            # Do NOT register in index — wikilinks to this key will be dropped
     return index
 
 
@@ -116,6 +186,55 @@ def _tag_node_id(tag: str) -> str:
 
 def _category_node_id(category: str) -> str:
     return f"category:{category}"
+
+
+_RELATION_TYPES = ("supersedes", "superseded_by", "depends_on", "refines", "contradicts", "references")
+
+
+def _extract_relations_edges(
+    graph: KnowledgeGraph,
+    doc: VaultDocument,
+    doc_index: dict[str, str],
+) -> int:
+    """Emit EXTRACTED edges from frontmatter.relations.{type}: [targets].
+
+    Returns number of edges emitted.
+    """
+    relations = doc.frontmatter.get("relations")
+    if not isinstance(relations, dict):
+        return 0
+
+    count = 0
+    for rel_type in _RELATION_TYPES:
+        targets = relations.get(rel_type)
+        if not targets:
+            continue
+        # Normalize: accept str or list[str]
+        if isinstance(targets, str):
+            targets = [targets]
+        elif not isinstance(targets, list):
+            continue
+
+        for target in targets:
+            target_str = str(target).strip()
+            if not target_str:
+                continue
+            resolved = _resolve_wikilink(target_str, doc_index)
+            if resolved is None or resolved == doc.id:
+                continue
+            graph.add_edge(
+                Edge(
+                    source=doc.id,
+                    target=resolved,
+                    relation=rel_type,
+                    confidence="EXTRACTED",
+                    confidence_score=1.0,
+                    weight=1.0,
+                    source_pass="ast",
+                )
+            )
+            count += 1
+    return count
 
 
 import tiktoken
@@ -154,10 +273,25 @@ def extract_ast(graph: KnowledgeGraph, docs: list[VaultDocument]) -> None:
         _confidence = fm.get("confidence")
         _actionability = fm.get("actionability")
 
+        _VALID_ONT = {
+            "concept", "entity", "process", "tool", "project",
+            "fact", "decision", "rule", "procedure", "relation",
+            "unclassified",
+        }
+        fm_type = fm.get("type")
+        if fm_type is None:
+            _ont: str | None = None
+        elif fm_type in _VALID_ONT:
+            _ont = fm_type
+        else:
+            _ont = "unclassified"
+
+        kind = "knowledge" if doc.frontmatter.get("knowledge_id") else "note"
+
         note = Node(
             id=doc.id,
             label=doc.label,
-            kind="note",
+            kind=kind,
             source_file=str(doc.relative_path),
             content=doc.content,
             content_hash=doc.content_hash,
@@ -166,6 +300,7 @@ def extract_ast(graph: KnowledgeGraph, docs: list[VaultDocument]) -> None:
             maturity=_maturity if _maturity in ("seed", "growing", "mature", "archived") else None,
             confidence=_confidence if _confidence in ("high", "medium", "low") else None,
             actionability=_actionability if _actionability in ("reference", "decision", "task") else None,
+            ontology_type=_ont,
         )
         graph.add_node(note)
 
@@ -232,7 +367,10 @@ def extract_ast(graph: KnowledgeGraph, docs: list[VaultDocument]) -> None:
                 )
             )
 
-        # 4d: Aliases (point aliased names → the canonical doc)
+        # 4d: Relations frontmatter (Phase 2 explicit typed edges)
+        _extract_relations_edges(graph, doc, doc_index)
+
+        # 4e: Aliases (point aliased names → the canonical doc)
         # Note: we don't add edges for aliases since the index already maps them.
         # If we wanted to expose alias relationships in the graph, we'd add
         # 'aliased_as' self-edges or alias nodes, but that's not useful for MVP.
