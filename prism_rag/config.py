@@ -12,14 +12,16 @@ Example:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 PrivacyTier = Literal["paid", "free"]
+EmbedBackend = Literal["ollama", "gemini"]
 
 
 class GraphSource(BaseModel):
@@ -53,11 +55,32 @@ class PrismRagSettings(BaseSettings):
         description="Output directory for graph.json, GRAPH_REPORT.md, cache/",
     )
 
-    # ── Gemini (for embedding and vision in Pass 2/3) ────────────────
+    # ── Embedding backend ────────────────────────────────────────────
+    embed_backend: EmbedBackend = Field(
+        default="ollama",
+        description="Embedding backend: 'ollama' (local, no API key) or 'gemini' (cloud API)",
+    )
+
+    # Ollama settings (used when embed_backend='ollama')
+    ollama_host: str = Field(
+        default="http://localhost:11434",
+        description="Ollama API base URL (PRISM_OLLAMA_HOST; falls back to OLLAMA_HOST env var)",
+    )
+    ollama_model: str = Field(
+        default="bge-m3",
+        description="Ollama embedding model — must be the same at index time and query time",
+    )
+
+    # Gemini settings (used when embed_backend='gemini')
     gemini_api_key: str = Field(default="", description="Gemini API key")
     privacy_tier: PrivacyTier = Field(
         default="paid",
         description="'paid' requires paid-tier API key (default); 'free' allows free tier (data may be used for training)",
+    )
+    embed_dimensionality: int = Field(
+        default=768,
+        ge=64,
+        description="Gemini embedding output dimension (Matryoshka truncation). Ignored for Ollama (dim=1024).",
     )
 
     # ── Similarity edges (Pass 3, not used in MVP) ───────────────────
@@ -136,6 +159,15 @@ class PrismRagSettings(BaseSettings):
         elif isinstance(v, Path):
             v = v.expanduser()
         return v
+
+    @model_validator(mode="after")
+    def _ollama_host_fallback(self) -> "PrismRagSettings":
+        # If PRISM_OLLAMA_HOST wasn't set but OLLAMA_HOST is, use the latter.
+        if self.ollama_host == "http://localhost:11434":
+            env_host = os.environ.get("OLLAMA_HOST", "")
+            if env_host:
+                self.ollama_host = env_host
+        return self
 
     # ── Derived paths ────────────────────────────────────────────────
     @property

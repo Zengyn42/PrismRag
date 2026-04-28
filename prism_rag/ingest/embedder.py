@@ -20,7 +20,6 @@ Usage:
 from __future__ import annotations
 
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -39,7 +38,7 @@ _RATE_LIMIT_DELAY = 0.5
 # ── Ollama Embedder ───────────────────────────────────────────────────────────
 
 _OLLAMA_DEFAULT_MODEL = "bge-m3"
-_OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+_OLLAMA_DEFAULT_HOST = "http://localhost:11434"
 
 
 class OllamaEmbedder:
@@ -59,7 +58,7 @@ class OllamaEmbedder:
     def __init__(
         self,
         model: str = _OLLAMA_DEFAULT_MODEL,
-        base_url: str = _OLLAMA_BASE_URL,
+        base_url: str = _OLLAMA_DEFAULT_HOST,
     ) -> None:
         self.model = model
         self._url = f"{base_url.rstrip('/')}/api/embed"
@@ -127,49 +126,46 @@ def _get_embeddable_nodes(graph: KnowledgeGraph) -> list[tuple[str, str]]:
 def compute_embeddings(
     graph: KnowledgeGraph,
     settings: PrismRagSettings,
-    dimensionality: int = 768,
 ) -> dict[str, list[float]]:
-    """Compute Gemini Embedding 2 vectors for all embeddable nodes.
+    """Compute embeddings for all embeddable nodes using the configured backend.
 
-    Args:
-        graph: Knowledge graph with nodes populated (after Pass 1).
-        settings: Must have gemini_api_key set.
-        dimensionality: Output vector dimension (Matryoshka). Default 768.
+    Backend is selected by settings.embed_backend ('ollama' or 'gemini').
+    Ollama uses settings.ollama_host / settings.ollama_model (local, no key needed).
+    Gemini uses settings.gemini_api_key / settings.embed_dimensionality.
 
     Returns:
         dict mapping node_id → embedding vector (list of floats).
-
-    Raises:
-        ValueError: If API key is not configured.
     """
-    if not settings.gemini_api_key:
-        raise ValueError(
-            "PRISM_GEMINI_API_KEY is required for Pass 3 (embedding). "
-            "Get one at https://aistudio.google.com/apikey"
-        )
-
-    if settings.privacy_tier == "free":
-        logger.warning(
-            "[embedder] privacy_tier=free: Gemini free tier may use your data "
-            "for model training. Set PRISM_PRIVACY_TIER=paid for production use."
-        )
-
-    backend = os.environ.get("PRISM_EMBED_BACKEND", "ollama").lower()
-
-    if backend == "ollama":
-        return _compute_embeddings_ollama(graph)
+    if settings.embed_backend == "ollama":
+        return _compute_embeddings_ollama(graph, settings)
     else:
-        return _compute_embeddings_gemini(graph, settings, dimensionality)
+        if not settings.gemini_api_key:
+            raise ValueError(
+                "PRISM_GEMINI_API_KEY is required when embed_backend='gemini'. "
+                "Get one at https://aistudio.google.com/apikey, "
+                "or set PRISM_EMBED_BACKEND=ollama for local embedding."
+            )
+        if settings.privacy_tier == "free":
+            logger.warning(
+                "[embedder] privacy_tier=free: Gemini free tier may use your data "
+                "for model training. Set PRISM_PRIVACY_TIER=paid for production use."
+            )
+        return _compute_embeddings_gemini(graph, settings, settings.embed_dimensionality)
 
 
-def _compute_embeddings_ollama(graph: KnowledgeGraph) -> dict[str, list[float]]:
-    """Compute embeddings using local Ollama (bge-m3, dim=1024)."""
+def _compute_embeddings_ollama(
+    graph: KnowledgeGraph,
+    settings: PrismRagSettings | None = None,
+) -> dict[str, list[float]]:
+    """Compute embeddings using local Ollama."""
     nodes_to_embed = _get_embeddable_nodes(graph)
     if not nodes_to_embed:
         logger.info("[embedder/ollama] no embeddable nodes found")
         return {}
 
-    embedder = OllamaEmbedder()
+    model = settings.ollama_model if settings else _OLLAMA_DEFAULT_MODEL
+    host = settings.ollama_host if settings else _OLLAMA_DEFAULT_HOST
+    embedder = OllamaEmbedder(model=model, base_url=host)
     logger.info(
         f"[embedder/ollama] computing {len(nodes_to_embed)} embeddings "
         f"(model={embedder.model})"
