@@ -23,6 +23,7 @@ def bfs_traverse(
     entry_id: str,
     budget: int = 4000,
     max_depth: int = 10,
+    min_confidence: float = 0.0,
 ) -> list[dict]:
     """BFS from entry_id, collecting nodes up to token budget.
 
@@ -71,6 +72,8 @@ def bfs_traverse(
             if neighbor_id in visited:
                 continue
             edge_data = graph.g.edges[node_id, neighbor_id]
+            if float(edge_data.get("confidence_score", 1.0)) < min_confidence:
+                continue
             weight = float(edge_data.get("weight", 1.0))
             neighbors.append((neighbor_id, weight))
 
@@ -79,6 +82,8 @@ def bfs_traverse(
             if predecessor_id in visited:
                 continue
             edge_data = graph.g.edges[predecessor_id, node_id]
+            if float(edge_data.get("confidence_score", 1.0)) < min_confidence:
+                continue
             weight = float(edge_data.get("weight", 1.0))
             neighbors.append((predecessor_id, weight))
 

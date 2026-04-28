@@ -32,6 +32,11 @@ dependencies = [
     # Markdown AST (wikilinks / callouts / block refs extraction)
     "markdown-it-py>=3.0",
 
+    # ── Hybrid search (BM25 keyword index) ──────────────────────────
+    "rank-bm25>=1.9",
+    # Chinese tokenization for BM25 (optional at import time, graceful fallback)
+    "jieba>=0.42",
+
     # ── Token counting (chunker + query budget) ──────────────────────
     "tiktoken>=0.8.0",
 

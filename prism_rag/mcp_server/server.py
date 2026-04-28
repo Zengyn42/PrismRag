@@ -42,6 +42,7 @@ from prism_rag.config import PrismRagSettings
 from prism_rag.retrieve.bfs import bfs_traverse, federated_bfs
 from prism_rag.retrieve.dfs import dfs_traverse, federated_dfs
 from prism_rag.retrieve.entry import resolve_entry_point, resolve_entry_points
+from prism_rag.retrieve.impact import format_impact_report, impact_bfs
 from prism_rag.store.federated import FederatedGraph
 from prism_rag.store.graph import KnowledgeGraph
 
@@ -123,6 +124,7 @@ def search_knowledge(
     mode: str = "bfs",
     scope: str = "",
     ontology_type: str = "",
+    min_confidence: float = 0.0,
 ) -> str:
     """Search the knowledge graph for information about a topic.
 
@@ -510,6 +512,57 @@ def list_namespaces() -> str:
         "bridges": len(fg.bridges),
         "total_nodes": fg.node_count,
     }, ensure_ascii=False, indent=2)
+
+
+# -- Tool 7: impact ----------------------------------------------------------
+
+
+@mcp.tool()
+def impact(
+    target: str,
+    direction: str = "upstream",
+    max_depth: int = 3,
+    min_confidence: float = 0.7,
+    scope: str = "",
+) -> str:
+    """Analyse the impact radius of changing a node.
+
+    Answers: "If I change *target*, what else is affected?"
+
+    Args:
+        target: Node ID or label to analyse (supports ``namespace::id`` syntax).
+        direction:
+            "upstream"   — who depends on / calls / references target?
+            "downstream" — what does target depend on / call / reference?
+            "both"       — union of both directions.
+        max_depth: Maximum traversal hops (default 3).
+        min_confidence: Skip edges below this confidence score (default 0.7).
+        scope: Restrict to this namespace (empty = search all).
+
+    Returns:
+        Human-readable impact report grouped by depth.
+    """
+    fg = _ensure_federated()
+    entries = resolve_entry_points(fg, target, scope=scope or None)
+    if not entries:
+        return f"No node found matching: {target!r}"
+
+    ns, node_id = entries[0]
+    graph = fg.get_graph(ns)
+    if graph is None:
+        return f"Namespace {ns!r} not loaded."
+
+    if direction not in ("upstream", "downstream", "both"):
+        direction = "upstream"
+
+    result = impact_bfs(
+        graph,
+        node_id,
+        direction=direction,  # type: ignore[arg-type]
+        max_depth=max_depth,
+        min_confidence=min_confidence,
+    )
+    return format_impact_report(graph, node_id, result, direction)  # type: ignore[arg-type]
 
 
 # -- Register ported Obsidian MCP tools (vault_tools.py) ---------------------

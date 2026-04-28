@@ -77,6 +77,13 @@ class EmbeddingStore:
         except Exception:
             return []
 
+    def nearest(self, vector: list[float], top_k: int = 10) -> list[str]:
+        """Return top-K node IDs ordered by similarity (closest first).
+
+        Convenience wrapper used by hybrid_search — returns only IDs, not distances.
+        """
+        return [nid for nid, _ in self.search(vector, top_k=top_k)]
+
     def count(self) -> int:
         """Number of stored embeddings."""
         try:

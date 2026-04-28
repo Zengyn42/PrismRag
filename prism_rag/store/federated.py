@@ -81,7 +81,7 @@ class FederatedGraph:
         for ns, kg in self._graphs.items():
             for node_id, data in kg.g.nodes(data=True):
                 qid = f"{ns}::{node_id}"
-                unified.add_node(qid, **data, namespace=ns)
+                unified.add_node(qid, **{**data, "namespace": ns})
             for src, tgt, data in kg.g.edges(data=True):
                 unified.add_edge(f"{ns}::{src}", f"{ns}::{tgt}", **data)
 

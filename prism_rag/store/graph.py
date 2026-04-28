@@ -48,8 +48,14 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 Confidence = Literal["EXTRACTED", "INFERRED", "AMBIGUOUS"]
-NodeKind = Literal["note", "knowledge", "tag", "category", "image", "pdf", "audio", "section", "block"]
-SourcePass = Literal["ast", "media", "embedding", "llm"]
+NodeKind = Literal[
+    "note", "knowledge", "tag", "category", "image", "pdf", "audio", "section", "block",
+    # v5.0 parser namespaces
+    "function", "class", "module",  # code::
+    "fact",                          # conv::
+]
+SourcePass = Literal["ast", "media", "embedding", "llm", "code", "conv"]
+Namespace = Literal["nimbus", "code", "conv"]
 
 # ── Six-space Am attributes (K-space attribute dimension) ─────────────────
 # Derived from Wang Yanzhang's Six-Space Theory, K-space (knowledge element
@@ -89,6 +95,9 @@ class Node:
 
     # Semantic ontology type (Vault Phase 2). Populated from frontmatter.type.
     ontology_type: OntologyType | None = None
+
+    # v5.0: parser namespace ("nimbus" | "code" | "conv"). Default nimbus for backward compat.
+    namespace: str = "nimbus"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

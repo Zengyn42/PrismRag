@@ -1,30 +1,29 @@
-"""Pass 3a: Compute embeddings for all text nodes using Gemini Embedding 2.
+"""Pass 3a: Compute embeddings for all text nodes.
 
-This module handles:
-- Batch embedding computation (respects API rate limits)
-- Matryoshka dimensionality control (default 768)
-- Content truncation for documents exceeding 8192 token input limit
-- Privacy tier enforcement (paid vs free)
+Supports two backends selected via PRISM_EMBED_BACKEND env var:
 
-Embeddings are computed INDEX-TIME ONLY. They are NOT used for query-time retrieval.
-Their sole purpose is to feed into similarity_linker.py (Pass 3b) which generates
-`semantically_similar_to` edges in the graph.
+  ollama  (default) — bge-m3 via local Ollama, no API key needed, dim=1024
+  gemini            — gemini-embedding-2-preview, requires PRISM_GEMINI_API_KEY, dim=768
+
+Both backends expose the same interface:
+  compute_embeddings(graph, settings) → dict[node_id, list[float]]
+
+OllamaEmbedder also provides embed_query(text) for query-time use in hybrid search.
 
 Usage:
-    from prism_rag.ingest.embedder import compute_embeddings
+    from prism_rag.ingest.embedder import compute_embeddings, OllamaEmbedder
     vectors = compute_embeddings(graph, settings)
-    # vectors: dict[node_id, list[float]]
+    embedder = OllamaEmbedder()
+    qvec = embedder.embed_query("context explosion")
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
-
-from google import genai
-from google.genai.types import EmbedContentConfig
 
 from prism_rag.config import PrismRagSettings
 from prism_rag.store.graph import KnowledgeGraph
@@ -32,10 +31,67 @@ from prism_rag.store.graph import KnowledgeGraph
 logger = logging.getLogger(__name__)
 
 # Gemini Embedding 2 limits
-_MODEL = "gemini-embedding-2-preview"
-_MAX_INPUT_CHARS = 30_000  # ~8192 tokens; truncate beyond this
-_BATCH_SIZE = 20  # documents per API call (avoid overwhelming the API)
-_RATE_LIMIT_DELAY = 0.5  # seconds between batches (free tier is rate-limited)
+_GEMINI_MODEL = "gemini-embedding-2-preview"
+_MAX_INPUT_CHARS = 30_000
+_BATCH_SIZE = 20
+_RATE_LIMIT_DELAY = 0.5
+
+# ── Ollama Embedder ───────────────────────────────────────────────────────────
+
+_OLLAMA_DEFAULT_MODEL = "bge-m3"
+_OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+
+
+class OllamaEmbedder:
+    """Embed text via a local Ollama model (default: bge-m3, dim=1024).
+
+    Works for both index-time (batch) and query-time (single) embedding,
+    so the same model is used in both directions — a requirement for
+    meaningful similarity comparisons.
+
+    Usage::
+
+        embedder = OllamaEmbedder()
+        vec = embedder.embed_query("what is context explosion?")
+        vecs = embedder.embed_batch(["text a", "text b"])
+    """
+
+    def __init__(
+        self,
+        model: str = _OLLAMA_DEFAULT_MODEL,
+        base_url: str = _OLLAMA_BASE_URL,
+    ) -> None:
+        self.model = model
+        self._url = f"{base_url.rstrip('/')}/api/embed"
+
+    def embed_query(self, text: str) -> list[float]:
+        """Embed a single query string. Raises on failure."""
+        return self._call([text])[0]
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed a list of texts. Returns one vector per input."""
+        if not texts:
+            return []
+        return self._call(texts)
+
+    def _call(self, inputs: list[str]) -> list[list[float]]:
+        import urllib.request
+        import json as _json
+
+        payload = _json.dumps({"model": self.model, "input": inputs}).encode()
+        req = urllib.request.Request(
+            self._url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = _json.loads(resp.read())
+        embeddings = body.get("embeddings", [])
+        if len(embeddings) != len(inputs):
+            raise ValueError(
+                f"Ollama returned {len(embeddings)} embeddings for {len(inputs)} inputs"
+            )
+        return [list(e) for e in embeddings]
 
 
 def _truncate(text: str, max_chars: int = _MAX_INPUT_CHARS) -> str:
@@ -98,48 +154,97 @@ def compute_embeddings(
             "for model training. Set PRISM_PRIVACY_TIER=paid for production use."
         )
 
+    backend = os.environ.get("PRISM_EMBED_BACKEND", "ollama").lower()
+
+    if backend == "ollama":
+        return _compute_embeddings_ollama(graph)
+    else:
+        return _compute_embeddings_gemini(graph, settings, dimensionality)
+
+
+def _compute_embeddings_ollama(graph: KnowledgeGraph) -> dict[str, list[float]]:
+    """Compute embeddings using local Ollama (bge-m3, dim=1024)."""
+    nodes_to_embed = _get_embeddable_nodes(graph)
+    if not nodes_to_embed:
+        logger.info("[embedder/ollama] no embeddable nodes found")
+        return {}
+
+    embedder = OllamaEmbedder()
+    logger.info(
+        f"[embedder/ollama] computing {len(nodes_to_embed)} embeddings "
+        f"(model={embedder.model})"
+    )
+    vectors: dict[str, list[float]] = {}
+    total = len(nodes_to_embed)
+
+    for i, (node_id, content) in enumerate(nodes_to_embed):
+        try:
+            vec = embedder.embed_query(_truncate(content))
+            vectors[node_id] = vec
+        except Exception as exc:
+            logger.error(f"[embedder/ollama] node {node_id} failed: {exc}")
+            continue
+        if (i + 1) % 20 == 0 or i + 1 == total:
+            logger.info(f"[embedder/ollama] progress: {i + 1}/{total}")
+
+    logger.info(f"[embedder/ollama] done: {len(vectors)}/{total}")
+    return vectors
+
+
+def _compute_embeddings_gemini(
+    graph: KnowledgeGraph,
+    settings: PrismRagSettings,
+    dimensionality: int = 768,
+) -> dict[str, list[float]]:
+    """Compute embeddings using Gemini Embedding 2 API."""
+    from google import genai
+    from google.genai.types import EmbedContentConfig
+
+    if not settings.gemini_api_key:
+        raise ValueError(
+            "PRISM_GEMINI_API_KEY is required for Gemini backend. "
+            "Set PRISM_EMBED_BACKEND=ollama for local embedding."
+        )
+
+    if settings.privacy_tier == "free":
+        logger.warning(
+            "[embedder/gemini] privacy_tier=free: Gemini free tier may use your data "
+            "for model training. Set PRISM_PRIVACY_TIER=paid for production use."
+        )
+
     client = genai.Client(api_key=settings.gemini_api_key)
     config = EmbedContentConfig(output_dimensionality=dimensionality)
 
     nodes_to_embed = _get_embeddable_nodes(graph)
     if not nodes_to_embed:
-        logger.info("[embedder] no embeddable nodes found")
+        logger.info("[embedder/gemini] no embeddable nodes found")
         return {}
 
     logger.info(
-        f"[embedder] computing embeddings for {len(nodes_to_embed)} nodes "
-        f"(model={_MODEL}, dim={dimensionality})"
+        f"[embedder/gemini] computing {len(nodes_to_embed)} embeddings "
+        f"(model={_GEMINI_MODEL}, dim={dimensionality})"
     )
-
     vectors: dict[str, list[float]] = {}
     total = len(nodes_to_embed)
 
-    # embed_content with a list of strings concatenates them into ONE embedding.
-    # We must call per-document to get separate vectors.
     for i, (node_id, content) in enumerate(nodes_to_embed):
         truncated = _truncate(content)
         try:
             result = client.models.embed_content(
-                model=_MODEL,
+                model=_GEMINI_MODEL,
                 contents=truncated,
                 config=config,
             )
             vectors[node_id] = result.embeddings[0].values
         except Exception as e:
-            logger.error(f"[embedder] node {node_id} failed: {e}")
+            logger.error(f"[embedder/gemini] node {node_id} failed: {e}")
             continue
-
-        # Log progress every 20 nodes
         if (i + 1) % 20 == 0 or i + 1 == total:
-            logger.info(f"[embedder] progress: {i + 1}/{total}")
-
-        # Rate limiting (free tier has ~1500 RPM, pace at ~2 req/sec)
+            logger.info(f"[embedder/gemini] progress: {i + 1}/{total}")
         if i + 1 < total:
             time.sleep(_RATE_LIMIT_DELAY)
 
-    logger.info(
-        f"[embedder] done: {len(vectors)}/{total} nodes embedded successfully"
-    )
+    logger.info(f"[embedder/gemini] done: {len(vectors)}/{total}")
     return vectors
 
 
