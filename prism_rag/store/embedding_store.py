@@ -64,10 +64,8 @@ class EmbeddingStore:
     def all_embeddings(self) -> dict[str, list[float]]:
         """Load all embeddings as {node_id: vector} dict."""
         try:
-            df = self._table.to_pandas()
-            if df.empty:
-                return {}
-            return {row["node_id"]: list(row["embedding"]) for _, row in df.iterrows()}
+            rows = self._table.to_arrow().to_pylist()
+            return {r["node_id"]: list(r["embedding"]) for r in rows}
         except Exception:
             return {}
 

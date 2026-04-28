@@ -1,0 +1,17 @@
+{
+  "name": "prism-rag",
+  "description": "Obsidian vault 知识库 RAG 工具，提供笔记读写、搜索、链接查询、标签管理、frontmatter 操作等功能",
+  "server": {
+    "module": "prism_rag.cli",
+    "module_args": [
+      "serve",
+      "--transport", "sse",
+      "--port", "8102",
+      "--vault", "/home/kingy/Foundation/NimbusVault",
+      "--data-dir", "/home/kingy/Foundation/PrismRag/data"
+    ],
+    "url": "http://localhost:8102/sse",
+    "shared": true
+  },
+  "dependency": null
+}

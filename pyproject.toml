@@ -2,7 +2,7 @@
 name = "prism-rag"
 version = "0.0.1"
 description = "无垠智穹图优先 RAG 系统 — Obsidian 知识图谱构建、Leiden 社区发现、MCP Server 检索接口"
-authors = [{ name = "Zengyn42", email = "hani@wuyin.ai" }]
+authors = [{ name = "Zengyn42", email = "hani@zengyn42.ai" }]
 license = { text = "Proprietary" }
 readme = "README.md"
 requires-python = ">=3.11"

@@ -23,7 +23,7 @@ from prism_rag.ingest.vault_loader import VaultDocument, discover_markdown_files
 from prism_rag.report.graph_report import generate_report
 from prism_rag.store.graph import Edge, KnowledgeGraph, Node
 
-VAULT_PATH = Path(os.environ.get("PRISM_VAULT_PATH", Path.home() / "Foundation" / "Vault"))
+VAULT_PATH = Path(os.environ.get("PRISM_VAULT_PATH", Path.home() / "Foundation" / "NimbusVault"))
 
 
 # ═══════════════════════════════════════════════════════════════════
