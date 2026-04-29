@@ -52,6 +52,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Code repository parsing (code:: namespace)
+code = [
+    "tree-sitter>=0.24",
+    "tree-sitter-python>=0.23",
+]
+
 # Multimodal ingestion: images / PDFs / audio → text nodes
 media = [
     "pillow>=10.0",
