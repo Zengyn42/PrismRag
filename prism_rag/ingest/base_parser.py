@@ -1,20 +1,28 @@
 """Parser plugin interface — base class for all data-source parsers.
 
-Every parser converts a raw data source (vault directory, code repo,
-conversation history, …) into a list of Nodes and Edges that the
-ingest pipeline can process identically regardless of origin.
+Every parser converts a raw data source into a ParseTree. The StorageBackend
+then decides how to persist it (NetworkX today, Kuzu tomorrow).
+
+Content rule:
+  Each TreeNode.content = the node's OWN text only, not its children's.
+  This keeps embeddings precise and avoids BM25 duplication.
 
 Implementing a new parser:
 
     class MyParser(Parser):
-        namespace = "myns"
+        @property
+        def namespace(self) -> str:
+            return "myns"
 
-        def parse(self, source: Path) -> tuple[list[Node], list[Edge]]:
-            ...
+        def parse(self, source: Path) -> ParseTree:
+            root = TreeNode(id=..., kind="note", ...)
+            root.add_child(TreeNode(...))
+            return ParseTree(root=root, namespace=self.namespace, source_file=str(source))
 
-Then wire it into the ingest CLI:
-
-    prism-rag ingest-myns --source /path/to/data
+Namespaces:
+  "nimbus"  — Obsidian / markdown vault     (NimbusParser — planned)
+  "code"    — source-code repository         (CodeParser — planned)
+  "conv"    — conversation extraction        (reserved, not yet implemented)
 """
 
 from __future__ import annotations
@@ -22,37 +30,33 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from prism_rag.store.graph import Edge, Node
+from prism_rag.ingest.base_tree import ParseTree
 
 
 class Parser(ABC):
-    """Abstract base class for all PrismRag data-source parsers.
-
-    Subclasses own the domain-specific extraction logic.
-    Everything downstream (embedding, Leiden, MCP) is parser-agnostic.
-    """
+    """Abstract base class for all PrismRag data-source parsers."""
 
     @property
     @abstractmethod
     def namespace(self) -> str:
-        """Namespace tag written into every produced Node.
+        """Namespace tag written into every produced TreeNode.
 
         Convention:
           "nimbus"  — Obsidian / markdown vault
           "code"    — source-code repository
-          "conv"    — conversation / dialogue extraction
+          "conv"    — conversation / dialogue extraction (reserved)
         """
         ...
 
     @abstractmethod
-    def parse(self, source: Path) -> tuple[list[Node], list[Edge]]:
-        """Parse *source* and return graph primitives.
+    def parse(self, source: Path) -> ParseTree:
+        """Parse *source* and return a ParseTree.
 
         Args:
-            source: Root path to parse. May be a single file or a directory.
+            source: Root path to parse (single file or directory).
 
         Returns:
-            Tuple of (nodes, edges). Both lists may be empty but never None.
-            Every Node must have ``namespace`` set to ``self.namespace``.
+            ParseTree whose root.content_hash reflects the full file content
+            (for file-level change detection in incremental ingest).
         """
         ...

@@ -85,7 +85,8 @@ class Node:
     content: str = ""
     content_hash: str = ""
     tokens: int = 0
-    frontmatter: dict[str, Any] = field(default_factory=dict)
+    frontmatter: dict[str, Any] = field(default_factory=dict)  # YAML frontmatter (docs)
+    metadata: dict[str, Any] = field(default_factory=dict)     # kind-specific data (code)
     community_id: str | None = None
 
     # Am attributes (populated by upstream Agent, persisted by PrismRag)
