@@ -240,3 +240,172 @@ def test_tokens_positive(tmp_repo: Path) -> None:
     result = CodeParser().parse(tmp_repo)
     fn_nodes = [n for n in result.nodes if n.kind == "function"]
     assert all(n.tokens > 0 for n in fn_nodes)
+
+
+# ── calls edge tests ──────────────────────────────────────────────────────────
+
+import tempfile
+import textwrap
+
+
+def _make_repo(files: dict[str, str]) -> tuple:
+    """Write files to a temp dir and parse with CodeParser. Returns (result, tmp_path)."""
+    import atexit, shutil
+    tmp = Path(tempfile.mkdtemp())
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
+    for name, content in files.items():
+        p = tmp / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(textwrap.dedent(content))
+    result = CodeParser().parse(tmp)
+    return result, tmp
+
+
+def _calls(result) -> list[tuple[str, str, str]]:
+    """Return [(short_caller, short_target, tier)] for all calls edges."""
+    return [
+        (
+            e.source_id.rsplit("::", 1)[-1],
+            e.target_id.rsplit("::", 1)[-1],
+            e.confidence_tier,
+        )
+        for e in result.edges
+        if e.kind == "calls"
+    ]
+
+
+class TestSelfCalls:
+    def test_self_method_resolved_extracted(self):
+        result, _ = _make_repo({"a.py": """
+            class Foo:
+                def run(self):
+                    self.helper()
+                def helper(self):
+                    pass
+        """})
+        c = _calls(result)
+        assert any(src == "run" and tgt == "helper" and tier == "EXTRACTED"
+                   for src, tgt, tier in c)
+
+    def test_self_call_confidence_1(self):
+        result, _ = _make_repo({"a.py": """
+            class Foo:
+                def run(self):
+                    self.helper()
+                def helper(self): pass
+        """})
+        edge = next(e for e in result.edges
+                    if e.kind == "calls" and e.source_id.endswith("::run"))
+        assert edge.confidence == 1.0
+
+    def test_self_call_not_duplicated(self):
+        result, _ = _make_repo({"a.py": """
+            class Foo:
+                def run(self):
+                    self.helper()
+                    self.helper()
+                def helper(self): pass
+        """})
+        c = [(e.source_id, e.target_id) for e in result.edges
+             if e.kind == "calls" and e.source_id.endswith("::run")]
+        assert len(c) == 1
+
+
+class TestFreeCallFromImport:
+    def test_from_import_free_call_extracted(self):
+        result, _ = _make_repo({
+            "b.py": "def foo(): pass\n",
+            "a.py": "from b import foo\ndef caller():\n    foo()\n",
+        })
+        c = _calls(result)
+        assert any(src == "caller" and tgt == "foo" and tier == "EXTRACTED"
+                   for src, tgt, tier in c)
+
+    def test_aliased_import_resolved(self):
+        result, _ = _make_repo({
+            "b.py": "def foo(): pass\n",
+            "a.py": "from b import foo as bar\ndef caller():\n    bar()\n",
+        })
+        c = _calls(result)
+        assert any(src == "caller" and tgt == "foo" and tier == "EXTRACTED"
+                   for src, tgt, tier in c)
+
+
+class TestModuleQualifiedCall:
+    def test_import_module_qualified_extracted(self):
+        result, _ = _make_repo({
+            "b.py": "def foo(): pass\n",
+            "a.py": "import b\ndef caller():\n    b.foo()\n",
+        })
+        c = _calls(result)
+        assert any(src == "caller" and tgt == "foo" and tier == "EXTRACTED"
+                   for src, tgt, tier in c)
+
+    def test_dedup_free_and_module_qualified_same_target(self):
+        # foo() and b.foo() both resolve to code::b.py::foo → only one edge
+        result, _ = _make_repo({
+            "b.py": "def foo(): pass\n",
+            "a.py": "from b import foo\nimport b\ndef caller():\n    foo()\n    b.foo()\n",
+        })
+        edges = [e for e in result.edges
+                 if e.kind == "calls" and e.source_id.endswith("::caller")]
+        assert len(edges) == 1
+
+
+class TestTypeAnnotatedCall:
+    def test_annotated_member_call_inferred(self):
+        result, _ = _make_repo({
+            "b.py": "class Bar:\n    def method(self): pass\n",
+            "a.py": "from b import Bar\ndef caller(obj: Bar):\n    obj.method()\n",
+        })
+        c = _calls(result)
+        assert any(src == "caller" and tgt == "method" and tier == "INFERRED"
+                   for src, tgt, tier in c)
+
+    def test_annotated_member_call_confidence_08(self):
+        result, _ = _make_repo({
+            "b.py": "class Bar:\n    def method(self): pass\n",
+            "a.py": "from b import Bar\ndef caller(obj: Bar):\n    obj.method()\n",
+        })
+        edge = next(e for e in result.edges
+                    if e.kind == "calls" and e.source_id.endswith("::caller"))
+        assert abs(edge.confidence - 0.8) < 1e-9
+
+    def test_unannotated_member_call_skipped(self):
+        result, _ = _make_repo({
+            "b.py": "class Bar:\n    def method(self): pass\n",
+            "a.py": "def caller(obj):\n    obj.method()\n",
+        })
+        c = _calls(result)
+        # No annotation → cannot resolve → no calls edge
+        assert not any(src == "caller" for src, tgt, tier in c)
+
+    def test_ambiguous_class_name_skipped(self):
+        # Two classes with same name → don't guess
+        result, _ = _make_repo({
+            "x.py": "class Foo:\n    def run(self): pass\n",
+            "y.py": "class Foo:\n    def run(self): pass\n",
+            "a.py": "def caller(obj: Foo):\n    obj.run()\n",
+        })
+        c = _calls(result)
+        assert not any(src == "caller" for src, tgt, tier in c)
+
+
+class TestCallsEdgesNotInherits:
+    def test_calls_kind_is_calls(self):
+        result, _ = _make_repo({"a.py": """
+            class Foo:
+                def run(self):
+                    self.helper()
+                def helper(self): pass
+        """})
+        for e in result.edges:
+            if e.kind == "calls":
+                assert e.confidence_tier in ("EXTRACTED", "INFERRED")
+
+    def test_no_calls_edge_to_self(self):
+        result, _ = _make_repo({"a.py": "def foo():\n    foo()\n"})
+        # Recursive call → same source and target → filtered out
+        edges = [e for e in result.edges
+                 if e.kind == "calls" and e.source_id == e.target_id]
+        assert len(edges) == 0

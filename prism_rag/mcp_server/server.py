@@ -524,6 +524,9 @@ def impact(
     max_depth: int = 3,
     min_confidence: float = 0.7,
     scope: str = "",
+    allowed_tiers: str = "EXTRACTED,INFERRED",
+    allowed_edge_kinds: str = "",
+    path_score_fn: str = "weakest_link",
 ) -> str:
     """Analyse the impact radius of changing a node.
 
@@ -538,9 +541,16 @@ def impact(
         max_depth: Maximum traversal hops (default 3).
         min_confidence: Skip edges below this confidence score (default 0.7).
         scope: Restrict to this namespace (empty = search all).
+        allowed_tiers: Comma-separated confidence tiers to follow.
+            Default "EXTRACTED,INFERRED" excludes AMBIGUOUS edges.
+            Pass "EXTRACTED,INFERRED,AMBIGUOUS" to include all.
+        allowed_edge_kinds: Comma-separated edge kinds to follow (e.g.
+            "calls,imports"). Empty string means follow all kinds.
+        path_score_fn: Scoring mode — "weakest_link" (default) or
+            "cumulative_decay".
 
     Returns:
-        Human-readable impact report grouped by depth.
+        Human-readable impact report grouped by depth with path scores.
     """
     fg = _ensure_federated()
     entries = resolve_entry_points(fg, target, scope=scope or None)
@@ -555,12 +565,27 @@ def impact(
     if direction not in ("upstream", "downstream", "both"):
         direction = "upstream"
 
+    tiers: frozenset[str] | None = (
+        frozenset(t.strip() for t in allowed_tiers.split(",") if t.strip())
+        if allowed_tiers.strip()
+        else None
+    )
+    kinds: frozenset[str] | None = (
+        frozenset(k.strip() for k in allowed_edge_kinds.split(",") if k.strip())
+        if allowed_edge_kinds.strip()
+        else None
+    )
+    score_fn = path_score_fn if path_score_fn in ("weakest_link", "cumulative_decay") else "weakest_link"
+
     result = impact_bfs(
         graph,
         node_id,
         direction=direction,  # type: ignore[arg-type]
         max_depth=max_depth,
         min_confidence=min_confidence,
+        allowed_tiers=tiers,
+        allowed_edge_kinds=kinds,
+        path_score_fn=score_fn,  # type: ignore[arg-type]
     )
     return format_impact_report(graph, node_id, result, direction)  # type: ignore[arg-type]
 

@@ -24,6 +24,7 @@ def bfs_traverse(
     budget: int = 4000,
     max_depth: int = 10,
     min_confidence: float = 0.0,
+    allowed_tiers: set[str] | None = None,
 ) -> list[dict]:
     """BFS from entry_id, collecting nodes up to token budget.
 
@@ -32,6 +33,10 @@ def bfs_traverse(
         entry_id: Starting node ID.
         budget: Maximum total tokens to collect.
         max_depth: Maximum BFS depth (prevents runaway on large graphs).
+        min_confidence: Skip edges whose confidence_score is below this value.
+        allowed_tiers: If set, only traverse edges whose confidence tier is in
+            this set (e.g. ``{"EXTRACTED", "INFERRED"}`` skips AMBIGUOUS edges).
+            ``None`` means all tiers pass.
 
     Returns:
         List of node data dicts (including 'id'), ordered by traversal.
@@ -72,7 +77,7 @@ def bfs_traverse(
             if neighbor_id in visited:
                 continue
             edge_data = graph.g.edges[node_id, neighbor_id]
-            if float(edge_data.get("confidence_score", 1.0)) < min_confidence:
+            if not _edge_passes(edge_data, min_confidence, allowed_tiers):
                 continue
             weight = float(edge_data.get("weight", 1.0))
             neighbors.append((neighbor_id, weight))
@@ -82,7 +87,7 @@ def bfs_traverse(
             if predecessor_id in visited:
                 continue
             edge_data = graph.g.edges[predecessor_id, node_id]
-            if float(edge_data.get("confidence_score", 1.0)) < min_confidence:
+            if not _edge_passes(edge_data, min_confidence, allowed_tiers):
                 continue
             weight = float(edge_data.get("weight", 1.0))
             neighbors.append((predecessor_id, weight))
@@ -93,6 +98,21 @@ def bfs_traverse(
             queue.append((neighbor_id, depth + 1))
 
     return result
+
+
+def _edge_passes(
+    edge_data: dict,
+    min_confidence: float,
+    allowed_tiers: set[str] | None,
+) -> bool:
+    """Return True if an edge satisfies both confidence filters."""
+    if float(edge_data.get("confidence_score", 1.0)) < min_confidence:
+        return False
+    if allowed_tiers is not None:
+        tier = edge_data.get("confidence", "EXTRACTED")
+        if tier not in allowed_tiers:
+            return False
+    return True
 
 
 def federated_bfs(

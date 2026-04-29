@@ -1,18 +1,21 @@
 """CodeParser — Python source repository parser for the code:: namespace.
 
-Uses Tree-sitter to extract module/class/function hierarchy and emits
-deterministic EXTRACTED edges for inherits and imports relationships.
+Two-phase pipeline:
+  Phase 1  — Tree-sitter AST walk: builds module/class/function node tree,
+             inherits + imports edges, per-file call-site capture, and
+             per-file import tables.
+  Phase 2  — Cross-file name resolution: resolves call sites to actual node
+             IDs and emits calls edges.
 
-Pipeline output for a directory source:
-  ParseTree
-    repo-root (kind="module")           ← virtual, carries repo hash
-    ├── module (one per .py file)
-    │   ├── class
-    │   │   └── function (methods)
-    │   └── function (top-level)
-  ExtraEdges
-    inherits   class → base class       EXTRACTED / 1.0
-    imports    module → imported name   EXTRACTED / 1.0
+Confidence tiers for calls edges:
+  EXTRACTED (1.0)  — deterministic:
+      • self.method() resolved within same class hierarchy
+      • import-resolved free calls  (from b import foo; foo())
+      • module-qualified calls      (import b; b.foo())
+  INFERRED  (0.8)  — probabilistic:
+      • type-annotation member calls (obj: FooClass → obj.method())
+        mapped to FooClass::method; correct when type is not overridden.
+  Skipped   — bare member calls without annotation, dynamic dispatch.
 
 Node IDs:
   module   code::path/to/file.py
@@ -20,14 +23,14 @@ Node IDs:
   method   code::path/to/file.py::ClassName::method_name
   fn       code::path/to/file.py::func_name
 
-Requires: tree-sitter, tree-sitter-python (pip install tree-sitter tree-sitter-python)
+Requires: tree-sitter, tree-sitter-python
 """
 
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import tree_sitter_python as tspython
 from tree_sitter import Language, Node as TSNode
@@ -47,6 +50,31 @@ _EXCLUDE_DIRS: frozenset[str] = frozenset({
     "node_modules", "build", "dist", "site-packages",
     ".gitnexus", ".obsidian",
 })
+
+
+# ── Data transfer objects ─────────────────────────────────────────────────────
+
+@dataclass
+class _CallSite:
+    """One call expression found inside a function body."""
+    caller_id: str           # node_id of the calling function/method
+    call_form: str           # "free" | "attr"
+    callee: str              # display string: "foo" or "obj.method"
+    receiver: str            # "" for free calls; "obj" / "self" for attr calls
+    method: str              # callee name for free; method name for attr
+    receiver_type: str       # "__self__" | annotated type name | ""
+    enclosing_class_id: str  # non-empty only when receiver_type == "__self__"
+
+
+@dataclass
+class _FileData:
+    """All Phase-1 output for one .py file."""
+    module_id: str
+    module_node: TreeNode
+    extra_edges: list[EdgeRecord]
+    # local_name → (resolved_node_id_or_best_guess, is_module)
+    import_table: dict[str, tuple[str, bool]] = field(default_factory=dict)
+    call_sites: list[_CallSite] = field(default_factory=list)
 
 
 # ── Public parser class ───────────────────────────────────────────────────────
@@ -75,10 +103,13 @@ class CodeParser(Parser):
         return _build_result(py_files, repo_root)
 
 
-# ── Build result ──────────────────────────────────────────────────────────────
+# ── Two-phase build ───────────────────────────────────────────────────────────
 
 def _build_result(py_files: list[Path], repo_root: Path) -> ParseResult:
     ts_parser = TSParser(_PY_LANGUAGE)
+
+    # Pre-build module name → module_id index (path arithmetic, no parsing needed)
+    module_index = _build_module_index(py_files, repo_root)
 
     repo_hash = hashlib.sha1(
         "".join(sorted(str(f) for f in py_files)).encode()
@@ -95,31 +126,41 @@ def _build_result(py_files: list[Path], repo_root: Path) -> ParseResult:
         metadata={"language": "python", "line_count": 0},
     )
 
-    extra_edges: list[EdgeRecord] = []
-
+    # ── Phase 1: parse all files ──────────────────────────────────────────────
+    file_datas: list[_FileData] = []
     for py_file in py_files:
         rel = py_file.relative_to(repo_root)
-        module_node, file_edges = _parse_file(ts_parser, py_file, rel)
-        if module_node is not None:
-            root.add_child(module_node)
-            extra_edges.extend(file_edges)
+        fd = _parse_file(ts_parser, py_file, rel, module_index)
+        if fd is not None:
+            file_datas.append(fd)
+            root.add_child(fd.module_node)
+
+    # ── Phase 2: resolve calls ────────────────────────────────────────────────
+    all_extra: list[EdgeRecord] = []
+    for fd in file_datas:
+        all_extra.extend(fd.extra_edges)
+
+    full_ids, class_index = _build_def_index(root)
+    calls_edges = _resolve_calls(file_datas, full_ids, class_index)
+    all_extra.extend(calls_edges)
 
     tree = ParseTree(root=root, namespace="code", source_file=str(repo_root))
-    return ParseResult.from_tree(tree, parser_id="CodeParser", extra_edges=extra_edges)
+    return ParseResult.from_tree(tree, parser_id="CodeParser", extra_edges=all_extra)
 
 
-# ── Per-file parse ────────────────────────────────────────────────────────────
+# ── Phase-1 per-file parse ────────────────────────────────────────────────────
 
 def _parse_file(
     ts_parser: TSParser,
     py_file: Path,
     rel_path: Path,
-) -> tuple[TreeNode | None, list[EdgeRecord]]:
+    module_index: dict[str, str],
+) -> _FileData | None:
     try:
         src_bytes = py_file.read_bytes()
         src_text = src_bytes.decode("utf-8", errors="replace")
     except OSError:
-        return None, []
+        return None
 
     ts_tree = ts_parser.parse(src_bytes)
     ts_root = ts_tree.root_node
@@ -142,46 +183,59 @@ def _parse_file(
         },
     )
 
+    import_table = _build_import_table(ts_root, module_index)
     extra_edges: list[EdgeRecord] = []
+    call_sites: list[_CallSite] = []
 
     for child in ts_root.named_children:
-        actual, decorators = _unwrap_decorated(child)
+        actual, _ = _unwrap_decorated(child)
 
         if actual.type == "class_definition":
-            class_node, edges = _parse_class(actual, src_bytes, module_id, rel_path)
+            class_node, edges, sites = _parse_class(
+                actual, src_bytes, module_id, rel_path
+            )
             if class_node is not None:
                 module_node.add_child(class_node)
                 extra_edges.extend(edges)
+                call_sites.extend(sites)
 
         elif actual.type == "function_definition":
-            fn_node = _parse_function(actual, src_bytes, module_id, rel_path)
+            fn_node, sites = _parse_function(
+                actual, src_bytes, module_id, rel_path, enclosing_class_id=""
+            )
             if fn_node is not None:
                 module_node.add_child(fn_node)
+                call_sites.extend(sites)
 
         elif actual.type in ("import_statement", "import_from_statement"):
             extra_edges.extend(_parse_import(actual, module_id))
 
-    return module_node, extra_edges
+    return _FileData(
+        module_id=module_id,
+        module_node=module_node,
+        extra_edges=extra_edges,
+        import_table=import_table,
+        call_sites=call_sites,
+    )
 
 
-# ── Class / function / import parsers ─────────────────────────────────────────
+# ── Class / function parsers ──────────────────────────────────────────────────
 
 def _parse_class(
     node: TSNode,
     src_bytes: bytes,
     module_id: str,
     rel_path: Path,
-) -> tuple[TreeNode | None, list[EdgeRecord]]:
+) -> tuple[TreeNode | None, list[EdgeRecord], list[_CallSite]]:
     name_node = node.child_by_field_name("name")
     if name_node is None:
-        return None, []
+        return None, [], []
 
     class_name = name_node.text.decode("utf-8")
     class_id = f"{module_id}::{class_name}"
     line_start = node.start_point[0] + 1
     line_end = node.end_point[0] + 1
 
-    # Superclasses
     bases: list[str] = []
     sup = node.child_by_field_name("superclasses")
     if sup is not None:
@@ -189,7 +243,6 @@ def _parse_class(
             if base.type in ("identifier", "attribute"):
                 bases.append(base.text.decode("utf-8"))
 
-    # Class content: header + docstring (not method bodies)
     body = node.child_by_field_name("body")
     docstring = _extract_docstring(body)
     class_header = f"class {class_name}"
@@ -230,15 +283,20 @@ def _parse_class(
         for base in bases
     ]
 
+    all_sites: list[_CallSite] = []
     if body is not None:
         for child in body.named_children:
             actual, _ = _unwrap_decorated(child)
             if actual.type == "function_definition":
-                fn_node = _parse_function(actual, src_bytes, class_id, rel_path)
+                fn_node, sites = _parse_function(
+                    actual, src_bytes, class_id, rel_path,
+                    enclosing_class_id=class_id,
+                )
                 if fn_node is not None:
                     class_node.add_child(fn_node)
+                    all_sites.extend(sites)
 
-    return class_node, extra_edges
+    return class_node, extra_edges, all_sites
 
 
 def _parse_function(
@@ -246,10 +304,11 @@ def _parse_function(
     src_bytes: bytes,
     parent_id: str,
     rel_path: Path,
-) -> TreeNode | None:
+    enclosing_class_id: str = "",
+) -> tuple[TreeNode | None, list[_CallSite]]:
     name_node = node.child_by_field_name("name")
     if name_node is None:
-        return None
+        return None, []
 
     fn_name = name_node.text.decode("utf-8")
     fn_id = f"{parent_id}::{fn_name}"
@@ -262,6 +321,7 @@ def _parse_function(
     params_text = params_node.text.decode("utf-8") if params_node is not None else "()"
     signature = f"{'async ' if is_async else ''}def {fn_name}{params_text}"
     parameters = _extract_param_names(params_node) if params_node is not None else []
+    param_types = _extract_param_type_map(params_node)
 
     ret_node = node.child_by_field_name("return_type")
     return_type = ret_node.text.decode("utf-8") if ret_node is not None else None
@@ -271,7 +331,7 @@ def _parse_function(
 
     content = src_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
 
-    return TreeNode(
+    fn_node = TreeNode(
         id=fn_id,
         kind="function",
         label=fn_name,
@@ -292,6 +352,9 @@ def _parse_function(
         },
     )
 
+    sites = _extract_call_sites(body, fn_id, param_types, enclosing_class_id)
+    return fn_node, sites
+
 
 def _parse_import(node: TSNode, module_id: str) -> list[EdgeRecord]:
     edges: list[EdgeRecord] = []
@@ -309,6 +372,19 @@ def _parse_import(node: TSNode, module_id: str) -> list[EdgeRecord]:
                     weight=1.0,
                     evidence=["import_statement"],
                 ))
+            elif name.type == "aliased_import":
+                inner = name.child_by_field_name("name")
+                if inner:
+                    mod = inner.text.decode("utf-8")
+                    edges.append(EdgeRecord(
+                        source_id=module_id,
+                        target_id=f"code::{mod.replace('.', '/')}",
+                        kind="imports",
+                        confidence_tier="EXTRACTED",
+                        confidence=1.0,
+                        weight=1.0,
+                        evidence=["import_statement"],
+                    ))
 
     elif node.type == "import_from_statement":
         mod_node = node.child_by_field_name("module_name")
@@ -330,6 +406,290 @@ def _parse_import(node: TSNode, module_id: str) -> list[EdgeRecord]:
             ))
 
     return edges
+
+
+# ── Phase-2 resolution ────────────────────────────────────────────────────────
+
+def _build_module_index(py_files: list[Path], repo_root: Path) -> dict[str, str]:
+    """Map Python dotted module names → module node_id.
+
+    e.g. "prism_rag.retrieve.bfs" → "code::prism_rag/retrieve/bfs.py"
+    """
+    index: dict[str, str] = {}
+    for f in py_files:
+        rel = f.relative_to(repo_root)
+        module_id = f"code::{rel.as_posix()}"
+        parts = list(rel.parts)
+        if parts[-1] == "__init__.py":
+            dotted = ".".join(parts[:-1])
+        elif parts[-1].endswith(".py"):
+            dotted = ".".join(parts)[:-3]
+        else:
+            continue
+        index[dotted] = module_id
+        # Also index by last component for unqualified lookups
+        index.setdefault(parts[-1][:-3] if parts[-1].endswith(".py") else parts[-1], module_id)
+    return index
+
+
+def _build_import_table(
+    ts_root: TSNode,
+    module_index: dict[str, str],
+) -> dict[str, tuple[str, bool]]:
+    """Return local_name → (resolved_node_id, is_module) for all top-level imports."""
+    table: dict[str, tuple[str, bool]] = {}
+
+    for child in ts_root.named_children:
+        if child.type == "import_statement":
+            for name_node in child.named_children:
+                if name_node.type == "dotted_name":
+                    mod_name = name_node.text.decode("utf-8")
+                    local = mod_name.split(".")[-1]
+                    mid = module_index.get(mod_name) or f"code::{mod_name.replace('.', '/')}"
+                    table[local] = (mid, True)
+                elif name_node.type == "aliased_import":
+                    inner = name_node.child_by_field_name("name")
+                    alias = name_node.child_by_field_name("alias")
+                    if inner and alias:
+                        mod_name = inner.text.decode("utf-8")
+                        local = alias.text.decode("utf-8")
+                        mid = module_index.get(mod_name) or f"code::{mod_name.replace('.', '/')}"
+                        table[local] = (mid, True)
+
+        elif child.type == "import_from_statement":
+            mod_node = child.child_by_field_name("module_name")
+            if mod_node is None:
+                continue
+            mod_text = mod_node.text.decode("utf-8")
+            # Skip relative imports — can't resolve without package context
+            if any(c.type == "." for c in child.children if c != mod_node):
+                pass  # might still have module_text
+            mod_name = mod_text.lstrip(".")
+            if not mod_name:
+                continue
+            mod_id = module_index.get(mod_name)
+
+            for name_node in child.children:
+                if name_node == mod_node:
+                    continue
+                if name_node.type in ("identifier", "dotted_name"):
+                    sym = name_node.text.decode("utf-8")
+                    target = (f"{mod_id}::{sym}" if mod_id
+                              else f"code::{mod_name.replace('.', '/')}.{sym}")
+                    table[sym] = (target, False)
+                elif name_node.type == "aliased_import":
+                    inner = name_node.child_by_field_name("name")
+                    alias = name_node.child_by_field_name("alias")
+                    if inner and alias:
+                        sym = inner.text.decode("utf-8")
+                        local = alias.text.decode("utf-8")
+                        target = (f"{mod_id}::{sym}" if mod_id
+                                  else f"code::{mod_name.replace('.', '/')}.{sym}")
+                        table[local] = (target, False)
+
+    return table
+
+
+def _build_def_index(
+    root: TreeNode,
+) -> tuple[set[str], dict[str, list[str]]]:
+    """Walk the built tree and return:
+      full_ids       — set of all node_ids (for O(1) existence check)
+      class_index    — short class_name → [node_ids] (for annotation lookup)
+    """
+    full_ids: set[str] = set()
+    class_index: dict[str, list[str]] = {}
+
+    def _walk(node: TreeNode) -> None:
+        full_ids.add(node.id)
+        if node.kind == "class":
+            label = node.label
+            class_index.setdefault(label, []).append(node.id)
+        for child in node.children:
+            _walk(child)
+
+    _walk(root)
+    return full_ids, class_index
+
+
+def _resolve_calls(
+    file_datas: list[_FileData],
+    full_ids: set[str],
+    class_index: dict[str, list[str]],
+) -> list[EdgeRecord]:
+    """Phase 2: resolve collected call sites to EdgeRecords."""
+    edges: list[EdgeRecord] = []
+    seen: set[tuple[str, str]] = set()  # (caller_id, target_id) dedup
+
+    for fd in file_datas:
+        for site in fd.call_sites:
+            target_id: str | None = None
+            tier = "EXTRACTED"
+            conf = 1.0
+
+            if site.call_form == "free":
+                target_id, tier, conf = _resolve_free_call(
+                    site.method, site.caller_id, fd
+                )
+
+            elif site.call_form == "attr":
+                target_id, tier, conf = _resolve_attr_call(
+                    site.receiver, site.method, site.receiver_type,
+                    site.enclosing_class_id, fd, full_ids, class_index
+                )
+
+            if target_id is None or target_id not in full_ids:
+                continue
+            if target_id == site.caller_id:
+                continue
+            key = (site.caller_id, target_id)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            edges.append(EdgeRecord(
+                source_id=site.caller_id,
+                target_id=target_id,
+                kind="calls",
+                confidence_tier=tier,
+                confidence=conf,
+                weight=conf,
+                evidence=[f"call:{site.callee}"],
+            ))
+
+    return edges
+
+
+def _resolve_free_call(
+    name: str,
+    caller_id: str,
+    fd: _FileData,
+) -> tuple[str | None, str, float]:
+    # 1. Import table: name is an imported symbol
+    if name in fd.import_table:
+        candidate, is_module = fd.import_table[name]
+        return candidate, "EXTRACTED", 1.0
+
+    # 2. Local definition: name defined in the same module
+    # caller_id might be "code::mod.py::ClassName::fn" — extract module prefix
+    module_id = fd.module_id
+    local_id = f"{module_id}::{name}"
+    return local_id, "EXTRACTED", 1.0
+
+
+def _resolve_attr_call(
+    receiver: str,
+    method: str,
+    receiver_type: str,
+    enclosing_class_id: str,
+    fd: _FileData,
+    full_ids: set[str],
+    class_index: dict[str, list[str]],
+) -> tuple[str | None, str, float]:
+    # 1. self.method() — look in enclosing class
+    if receiver_type == "__self__" and enclosing_class_id:
+        candidate = f"{enclosing_class_id}::{method}"
+        if candidate in full_ids:
+            return candidate, "EXTRACTED", 1.0
+        return None, "EXTRACTED", 1.0
+
+    # 2. b.foo() — receiver is in import table
+    if receiver in fd.import_table:
+        base_id, is_module = fd.import_table[receiver]
+        candidate = f"{base_id}::{method}"
+        if is_module:
+            return candidate, "EXTRACTED", 1.0
+        else:
+            # from x import SomeClass as b; b.method()
+            return candidate, "INFERRED", 0.8
+
+    # 3. obj.method() with type annotation: obj: FooClass
+    if receiver_type and receiver_type != "__self__":
+        candidates = class_index.get(receiver_type, [])
+        if len(candidates) == 1:
+            candidate = f"{candidates[0]}::{method}"
+            return candidate, "INFERRED", 0.8
+
+    return None, "EXTRACTED", 1.0
+
+
+# ── Call site extraction ──────────────────────────────────────────────────────
+
+def _extract_call_sites(
+    body: TSNode | None,
+    caller_id: str,
+    param_types: dict[str, str],
+    enclosing_class_id: str,
+) -> list[_CallSite]:
+    """Walk a function body and collect all call expressions."""
+    if body is None:
+        return []
+
+    sites: list[_CallSite] = []
+
+    def _walk(node: TSNode) -> None:
+        if node.type == "call":
+            func = node.child_by_field_name("function")
+            if func is not None:
+                if func.type == "identifier":
+                    name = func.text.decode("utf-8")
+                    sites.append(_CallSite(
+                        caller_id=caller_id,
+                        call_form="free",
+                        callee=name,
+                        receiver="",
+                        method=name,
+                        receiver_type="",
+                        enclosing_class_id="",
+                    ))
+                elif func.type == "attribute":
+                    obj_node = func.child_by_field_name("object")
+                    attr_node = func.child_by_field_name("attribute")
+                    if (obj_node is not None and attr_node is not None
+                            and obj_node.type == "identifier"):
+                        recv = obj_node.text.decode("utf-8")
+                        meth = attr_node.text.decode("utf-8")
+                        if recv == "self" and enclosing_class_id:
+                            rtype = "__self__"
+                            enc = enclosing_class_id
+                        else:
+                            rtype = param_types.get(recv, "")
+                            enc = ""
+                        sites.append(_CallSite(
+                            caller_id=caller_id,
+                            call_form="attr",
+                            callee=f"{recv}.{meth}",
+                            receiver=recv,
+                            method=meth,
+                            receiver_type=rtype,
+                            enclosing_class_id=enc,
+                        ))
+        for child in node.named_children:
+            _walk(child)
+
+    _walk(body)
+    return sites
+
+
+def _extract_param_type_map(params_node: TSNode | None) -> dict[str, str]:
+    """Return {param_name: type_name} for type-annotated parameters.
+
+    Only captures simple identifier types (e.g. "FooClass"), not generics.
+    """
+    if params_node is None:
+        return {}
+    types: dict[str, str] = {}
+    for p in params_node.named_children:
+        if p.type in ("typed_parameter", "typed_default_parameter"):
+            name_child = p.children[0] if (p.children and p.children[0].type == "identifier") else None
+            type_child = p.child_by_field_name("type")
+            if name_child and type_child:
+                param_name = name_child.text.decode("utf-8")
+                type_text = type_child.text.decode("utf-8").strip()
+                # Only map simple identifiers; skip Optional[X], list[X], etc.
+                if type_text.isidentifier():
+                    types[param_name] = type_text
+    return types
 
 
 # ── Tree-sitter helpers ───────────────────────────────────────────────────────
@@ -368,7 +728,6 @@ def _extract_param_names(params_node: TSNode) -> list[str]:
         elif p.type in (
             "typed_parameter", "default_parameter", "typed_default_parameter"
         ):
-            # The parameter name is the first child (an identifier) — not a named field.
             if p.children and p.children[0].type == "identifier":
                 names.append(p.children[0].text.decode("utf-8"))
         elif p.type in ("list_splat_pattern", "dictionary_splat_pattern"):

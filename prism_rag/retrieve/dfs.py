@@ -21,6 +21,8 @@ def dfs_traverse(
     entry_id: str,
     budget: int = 4000,
     max_depth: int = 10,
+    min_confidence: float = 0.0,
+    allowed_tiers: set[str] | None = None,
 ) -> list[dict]:
     """DFS from entry_id, collecting nodes up to token budget.
 
@@ -29,6 +31,9 @@ def dfs_traverse(
         entry_id: Starting node ID.
         budget: Maximum total tokens to collect.
         max_depth: Maximum DFS depth.
+        min_confidence: Skip edges whose confidence_score is below this value.
+        allowed_tiers: If set, only traverse edges whose confidence tier is in
+            this set. ``None`` means all tiers pass.
 
     Returns:
         List of node data dicts (including 'id'), ordered by traversal.
@@ -39,6 +44,13 @@ def dfs_traverse(
     visited: set[str] = set()
     result: list[dict] = []
     accumulated_tokens = 0
+
+    def _edge_ok(data: dict) -> bool:
+        if float(data.get("confidence_score", 1.0)) < min_confidence:
+            return False
+        if allowed_tiers is not None and data.get("confidence", "EXTRACTED") not in allowed_tiers:
+            return False
+        return True
 
     def _dfs(node_id: str, depth: int) -> None:
         nonlocal accumulated_tokens
@@ -63,12 +75,14 @@ def dfs_traverse(
         neighbors: list[tuple[str, float]] = []
         for neighbor_id in graph.g.neighbors(node_id):
             if neighbor_id not in visited:
-                weight = float(graph.g.edges[node_id, neighbor_id].get("weight", 1.0))
-                neighbors.append((neighbor_id, weight))
+                edata = graph.g.edges[node_id, neighbor_id]
+                if _edge_ok(edata):
+                    neighbors.append((neighbor_id, float(edata.get("weight", 1.0))))
         for predecessor_id in graph.g.predecessors(node_id):
             if predecessor_id not in visited:
-                weight = float(graph.g.edges[predecessor_id, node_id].get("weight", 1.0))
-                neighbors.append((predecessor_id, weight))
+                edata = graph.g.edges[predecessor_id, node_id]
+                if _edge_ok(edata):
+                    neighbors.append((predecessor_id, float(edata.get("weight", 1.0))))
 
         # Sort by weight descending, then DFS into each
         neighbors.sort(key=lambda pair: pair[1], reverse=True)
