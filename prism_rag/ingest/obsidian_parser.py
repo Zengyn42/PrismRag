@@ -1,4 +1,4 @@
-"""NimbusParser — Obsidian vault parser for the nimbus:: namespace.
+"""ObsidianParser — Obsidian vault parser for the nimbus:: namespace.
 
 Wraps vault_loader + the deterministic extraction logic from ast_extractor into
 the v5.0 parser pipeline. Produces a ParseResult that can be written via any
@@ -41,7 +41,7 @@ def _category_node_id(category: str) -> str:
     return f"category:{category}"
 
 
-class NimbusParser(Parser):
+class ObsidianParser(Parser):
     """Parser for Obsidian vaults (nimbus:: namespace).
 
     Call parse(vault_root) to get a ParseResult for the entire vault.
@@ -125,7 +125,7 @@ class NimbusParser(Parser):
 
         tree = ParseTree(root=root, namespace="nimbus", source_file=str(vault_root))
         extra_edges = self._build_lateral_edges(docs, doc_index)
-        return ParseResult.from_tree(tree, parser_id="NimbusParser", extra_edges=extra_edges)
+        return ParseResult.from_tree(tree, parser_id="ObsidianParser", extra_edges=extra_edges)
 
     def _build_lateral_edges(
         self,

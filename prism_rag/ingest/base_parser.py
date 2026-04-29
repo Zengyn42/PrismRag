@@ -22,7 +22,7 @@ Implementing a new parser:
             return ParseResult.from_tree(tree, parser_id="MyParser")
 
 Namespaces:
-  "nimbus"  — Obsidian / markdown vault     (NimbusParser)
+  "nimbus"  — Obsidian / markdown vault     (ObsidianParser)
   "code"    — source-code repository         (CodeParser — planned)
   "conv"    — conversation extraction        (reserved, not yet implemented)
 """
