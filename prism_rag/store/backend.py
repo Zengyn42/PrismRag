@@ -1,4 +1,4 @@
-"""StorageBackend — abstract write interface for ParseTree persistence.
+"""StorageBackend — abstract write interface for ParseTree/ParseResult persistence.
 
 Today: NetworkXBackend (graph.json + in-memory DiGraph).
 Future: KuzuBackend (per-kind node tables + typed REL tables + Cypher queries).
@@ -11,6 +11,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from prism_rag.ingest.base_tree import ParseTree
+from prism_rag.ingest.parse_result import ParseResult
 
 
 class StorageBackend(ABC):
@@ -21,6 +22,15 @@ class StorageBackend(ABC):
         """Write a ParseTree.
 
         For updates: call delete_by_source first, then write_tree.
+        """
+        ...
+
+    @abstractmethod
+    def write_result(self, result: ParseResult) -> None:
+        """Write a validated ParseResult (preferred over write_tree for v5.0 parsers).
+
+        ParseResult carries pre-validated confidence tiers and iron-law enforcement.
+        For updates: call delete_by_source first, then write_result.
         """
         ...
 

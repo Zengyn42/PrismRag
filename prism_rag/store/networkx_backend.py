@@ -10,8 +10,24 @@ stored content_hash for incremental ingest change detection.
 from __future__ import annotations
 
 from prism_rag.ingest.base_tree import FILE_LEVEL_KINDS, ParseTree, TreeNode
+from prism_rag.ingest.parse_result import EdgeRecord, NodeRecord, ParseResult
 from prism_rag.store.backend import StorageBackend
-from prism_rag.store.graph import Edge, KnowledgeGraph, Node
+from prism_rag.store.graph import Edge, KnowledgeGraph, Node, SourcePass
+
+# Maps EdgeRecord.kind to graph.py SourcePass.
+_KIND_SOURCE_PASS: dict[str, SourcePass] = {
+    "calls": "code",
+    "imports": "code",
+    "inherits": "code",
+}
+
+
+def _source_pass(kind: str, tier: str) -> SourcePass:
+    if kind in _KIND_SOURCE_PASS:
+        return _KIND_SOURCE_PASS[kind]
+    if tier == "INFERRED":
+        return "llm"
+    return "ast"
 
 
 class NetworkXBackend(StorageBackend):
@@ -63,6 +79,13 @@ class NetworkXBackend(StorageBackend):
         for child in node.children:
             self._walk(child, parent_id=node.id)
 
+    def write_result(self, result: ParseResult) -> None:
+        """Write a validated ParseResult into the KnowledgeGraph."""
+        for nr in result.nodes:
+            self._graph.add_node(_node_record_to_node(nr))
+        for er in result.edges:
+            self._graph.add_edge(_edge_record_to_edge(er))
+
     # ── Incremental ingest helpers ─────────────────────────────────────
 
     def delete_by_source(self, source_file: str, namespace: str) -> int:
@@ -84,3 +107,36 @@ class NetworkXBackend(StorageBackend):
             ):
                 return data.get("content_hash") or None
         return None
+
+
+# ── Record → graph.py dataclass conversions ───────────────────────────────────
+
+def _node_record_to_node(nr: NodeRecord) -> Node:
+    return Node(
+        id=nr.id,
+        label=nr.label,
+        kind=nr.kind,
+        source_file=nr.source_file,
+        content=nr.content,
+        content_hash=nr.content_hash,
+        tokens=nr.tokens,
+        namespace=nr.namespace,
+        frontmatter=nr.metadata.get("frontmatter", {}),
+        metadata={k: v for k, v in nr.metadata.items() if k != "frontmatter"},
+        maturity=nr.metadata.get("maturity"),
+        confidence=nr.metadata.get("confidence"),
+        actionability=nr.metadata.get("actionability"),
+        ontology_type=nr.metadata.get("ontology_type"),
+    )
+
+
+def _edge_record_to_edge(er: EdgeRecord) -> Edge:
+    return Edge(
+        source=er.source_id,
+        target=er.target_id,
+        relation=er.kind,
+        confidence=er.confidence_tier,          # Literal["EXTRACTED","INFERRED","AMBIGUOUS"]
+        confidence_score=er.confidence,          # float
+        weight=er.weight,
+        source_pass=_source_pass(er.kind, er.confidence_tier),
+    )

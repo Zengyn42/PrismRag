@@ -61,3 +61,4 @@ logs/
 .venv/
 
 lib/
+.gitnexus
