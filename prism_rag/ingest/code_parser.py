@@ -1,27 +1,32 @@
 """CodeParser — Python source repository parser for the code:: namespace.
 
-Two-phase pipeline:
-  Phase 1  — Tree-sitter AST walk: builds module/class/function node tree,
-             inherits + imports edges, per-file call-site capture, and
-             per-file import tables.
-  Phase 2  — Cross-file name resolution: resolves call sites to actual node
-             IDs and emits calls edges.
+Two-phase pipeline + post-processing:
+  Phase 1  — Tree-sitter AST walk: nodes (module/class/function), edges
+             (inherits, imports), per-file call-site capture, import tables.
+  Phase 2  — Cross-file name resolution → calls edges.
+             Includes relative import resolution and MRO-aware method lookup.
+  Phase 3  — Execution flow detection: entry-point scoring + BFS tracing
+             → flow nodes + step_of edges.
 
-Confidence tiers for calls edges:
+Confidence tiers for calls/step_of edges:
   EXTRACTED (1.0)  — deterministic:
-      • self.method() resolved within same class hierarchy
+      • self.method() within same class (or MRO ancestor)
       • import-resolved free calls  (from b import foo; foo())
       • module-qualified calls      (import b; b.foo())
   INFERRED  (0.8)  — probabilistic:
       • type-annotation member calls (obj: FooClass → obj.method())
-        mapped to FooClass::method; correct when type is not overridden.
-  Skipped   — bare member calls without annotation, dynamic dispatch.
+        resolved via class registry + MRO walk.
+  INFERRED  (0.7)  — execution flows (step_of edges).
+  Skipped   — bare member calls without annotation, dynamic dispatch,
+               ambiguous class names.
 
 Node IDs:
   module   code::path/to/file.py
   class    code::path/to/file.py::ClassName
   method   code::path/to/file.py::ClassName::method_name
   fn       code::path/to/file.py::func_name
+  flow     code::<repo>::flow::<entry_fn_name>
+  flows    code::<repo>::flows  (virtual container)
 
 Requires: tree-sitter, tree-sitter-python
 """
@@ -29,6 +34,7 @@ Requires: tree-sitter, tree-sitter-python
 from __future__ import annotations
 
 import hashlib
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -51,28 +57,30 @@ _EXCLUDE_DIRS: frozenset[str] = frozenset({
     ".gitnexus", ".obsidian",
 })
 
+_ENTRY_POINT_NAMES: frozenset[str] = frozenset({
+    "main", "run", "start", "serve", "execute", "dispatch",
+    "handle", "process", "boot", "launch", "init", "setup",
+})
+
 
 # ── Data transfer objects ─────────────────────────────────────────────────────
 
 @dataclass
 class _CallSite:
-    """One call expression found inside a function body."""
-    caller_id: str           # node_id of the calling function/method
+    caller_id: str
     call_form: str           # "free" | "attr"
-    callee: str              # display string: "foo" or "obj.method"
-    receiver: str            # "" for free calls; "obj" / "self" for attr calls
-    method: str              # callee name for free; method name for attr
+    callee: str
+    receiver: str
+    method: str
     receiver_type: str       # "__self__" | annotated type name | ""
-    enclosing_class_id: str  # non-empty only when receiver_type == "__self__"
+    enclosing_class_id: str
 
 
 @dataclass
 class _FileData:
-    """All Phase-1 output for one .py file."""
     module_id: str
     module_node: TreeNode
     extra_edges: list[EdgeRecord]
-    # local_name → (resolved_node_id_or_best_guess, is_module)
     import_table: dict[str, tuple[str, bool]] = field(default_factory=dict)
     call_sites: list[_CallSite] = field(default_factory=list)
 
@@ -80,12 +88,7 @@ class _FileData:
 # ── Public parser class ───────────────────────────────────────────────────────
 
 class CodeParser(Parser):
-    """Parser for Python source repositories (code:: namespace).
-
-    parse(source) accepts either a directory (whole repo) or a single .py file.
-    For a directory the returned ParseResult contains all modules under it; for
-    a file it returns just that module's subtree.
-    """
+    """Parser for Python source repositories (code:: namespace)."""
 
     @property
     def namespace(self) -> str:
@@ -99,16 +102,13 @@ class CodeParser(Parser):
         else:
             repo_root = source
             py_files = _find_py_files(source)
-
         return _build_result(py_files, repo_root)
 
 
-# ── Two-phase build ───────────────────────────────────────────────────────────
+# ── Orchestrator ──────────────────────────────────────────────────────────────
 
 def _build_result(py_files: list[Path], repo_root: Path) -> ParseResult:
     ts_parser = TSParser(_PY_LANGUAGE)
-
-    # Pre-build module name → module_id index (path arithmetic, no parsing needed)
     module_index = _build_module_index(py_files, repo_root)
 
     repo_hash = hashlib.sha1(
@@ -126,7 +126,7 @@ def _build_result(py_files: list[Path], repo_root: Path) -> ParseResult:
         metadata={"language": "python", "line_count": 0},
     )
 
-    # ── Phase 1: parse all files ──────────────────────────────────────────────
+    # ── Phase 1 ───────────────────────────────────────────────────────────────
     file_datas: list[_FileData] = []
     for py_file in py_files:
         rel = py_file.relative_to(repo_root)
@@ -140,9 +140,26 @@ def _build_result(py_files: list[Path], repo_root: Path) -> ParseResult:
     for fd in file_datas:
         all_extra.extend(fd.extra_edges)
 
-    full_ids, class_index = _build_def_index(root)
-    calls_edges = _resolve_calls(file_datas, full_ids, class_index)
+    full_ids, class_index, inherits_index, fn_meta = _build_def_index(root)
+    calls_edges = _resolve_calls(file_datas, full_ids, class_index, inherits_index)
     all_extra.extend(calls_edges)
+
+    # ── Phase 3: execution flow detection ─────────────────────────────────────
+    flow_nodes, flow_edges = _detect_flows(fn_meta, calls_edges, full_ids)
+    if flow_nodes:
+        flows_root = TreeNode(
+            id=f"code::{repo_root.name}::flows",
+            kind="flows",
+            label="execution flows",
+            content="",
+            namespace="code",
+            source_file=str(repo_root),
+            metadata={"flow_count": len(flow_nodes)},
+        )
+        for fn in flow_nodes:
+            flows_root.add_child(fn)
+        root.add_child(flows_root)
+        all_extra.extend(flow_edges)
 
     tree = ParseTree(root=root, namespace="code", source_file=str(repo_root))
     return ParseResult.from_tree(tree, parser_id="CodeParser", extra_edges=all_extra)
@@ -177,13 +194,10 @@ def _parse_file(
         source_file=str(rel_path),
         content_hash=hashlib.sha1(src_bytes).hexdigest(),
         tokens=_token_count(module_content),
-        metadata={
-            "language": "python",
-            "line_count": src_text.count("\n") + 1,
-        },
+        metadata={"language": "python", "line_count": src_text.count("\n") + 1},
     )
 
-    import_table = _build_import_table(ts_root, module_index)
+    import_table = _build_import_table(ts_root, module_index, rel_path)
     extra_edges: list[EdgeRecord] = []
     call_sites: list[_CallSite] = []
 
@@ -219,7 +233,7 @@ def _parse_file(
     )
 
 
-# ── Class / function parsers ──────────────────────────────────────────────────
+# ── Class / function / import parsers ─────────────────────────────────────────
 
 def _parse_class(
     node: TSNode,
@@ -233,8 +247,6 @@ def _parse_class(
 
     class_name = name_node.text.decode("utf-8")
     class_id = f"{module_id}::{class_name}"
-    line_start = node.start_point[0] + 1
-    line_end = node.end_point[0] + 1
 
     bases: list[str] = []
     sup = node.child_by_field_name("superclasses")
@@ -262,8 +274,8 @@ def _parse_class(
         tokens=_token_count(class_content),
         metadata={
             "language": "python",
-            "line_start": line_start,
-            "line_end": line_end,
+            "line_start": node.start_point[0] + 1,
+            "line_end": node.end_point[0] + 1,
             "is_exported": not class_name.startswith("_"),
             "bases": bases,
             "docstring": docstring,
@@ -312,11 +324,8 @@ def _parse_function(
 
     fn_name = name_node.text.decode("utf-8")
     fn_id = f"{parent_id}::{fn_name}"
-    line_start = node.start_point[0] + 1
-    line_end = node.end_point[0] + 1
 
     is_async = node.children[0].type == "async" if node.children else False
-
     params_node = node.child_by_field_name("parameters")
     params_text = params_node.text.decode("utf-8") if params_node is not None else "()"
     signature = f"{'async ' if is_async else ''}def {fn_name}{params_text}"
@@ -328,7 +337,6 @@ def _parse_function(
 
     body = node.child_by_field_name("body")
     docstring = _extract_docstring(body)
-
     content = src_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
 
     fn_node = TreeNode(
@@ -341,8 +349,8 @@ def _parse_function(
         tokens=_token_count(content),
         metadata={
             "language": "python",
-            "line_start": line_start,
-            "line_end": line_end,
+            "line_start": node.start_point[0] + 1,
+            "line_end": node.end_point[0] + 1,
             "signature": signature,
             "is_exported": not fn_name.startswith("_"),
             "is_async": is_async,
@@ -408,13 +416,10 @@ def _parse_import(node: TSNode, module_id: str) -> list[EdgeRecord]:
     return edges
 
 
-# ── Phase-2 resolution ────────────────────────────────────────────────────────
+# ── Phase-2: indexes and resolution ──────────────────────────────────────────
 
 def _build_module_index(py_files: list[Path], repo_root: Path) -> dict[str, str]:
-    """Map Python dotted module names → module node_id.
-
-    e.g. "prism_rag.retrieve.bfs" → "code::prism_rag/retrieve/bfs.py"
-    """
+    """Map dotted module names → module_id (e.g. "a.b.c" → "code::a/b/c.py")."""
     index: dict[str, str] = {}
     for f in py_files:
         rel = f.relative_to(repo_root)
@@ -427,7 +432,6 @@ def _build_module_index(py_files: list[Path], repo_root: Path) -> dict[str, str]
         else:
             continue
         index[dotted] = module_id
-        # Also index by last component for unqualified lookups
         index.setdefault(parts[-1][:-3] if parts[-1].endswith(".py") else parts[-1], module_id)
     return index
 
@@ -435,8 +439,9 @@ def _build_module_index(py_files: list[Path], repo_root: Path) -> dict[str, str]
 def _build_import_table(
     ts_root: TSNode,
     module_index: dict[str, str],
+    rel_path: Path,
 ) -> dict[str, tuple[str, bool]]:
-    """Return local_name → (resolved_node_id, is_module) for all top-level imports."""
+    """Return local_name → (resolved_node_id, is_module) for all imports."""
     table: dict[str, tuple[str, bool]] = {}
 
     for child in ts_root.named_children:
@@ -460,14 +465,23 @@ def _build_import_table(
             mod_node = child.child_by_field_name("module_name")
             if mod_node is None:
                 continue
-            mod_text = mod_node.text.decode("utf-8")
-            # Skip relative imports — can't resolve without package context
-            if any(c.type == "." for c in child.children if c != mod_node):
-                pass  # might still have module_text
-            mod_name = mod_text.lstrip(".")
-            if not mod_name:
-                continue
-            mod_id = module_index.get(mod_name)
+            mod_raw = mod_node.text.decode("utf-8")
+
+            # Count leading dots for relative imports
+            level = 0
+            for c in child.children:
+                if c.type == ".":
+                    level += 1
+                elif c != mod_node:
+                    break
+
+            mod_name = mod_raw.lstrip(".")
+
+            if level > 0:
+                # Relative import: resolve against current file's package
+                mod_id = _resolve_relative_import(level, mod_name, rel_path, module_index)
+            else:
+                mod_id = module_index.get(mod_name) if mod_name else None
 
             for name_node in child.children:
                 if name_node == mod_node:
@@ -490,36 +504,91 @@ def _build_import_table(
     return table
 
 
-def _build_def_index(
-    root: TreeNode,
-) -> tuple[set[str], dict[str, list[str]]]:
+def _resolve_relative_import(
+    level: int,
+    mod_name: str,
+    rel_path: Path,
+    module_index: dict[str, str],
+) -> str | None:
+    """Resolve a relative import to a module_id.
+
+    from . import x      → level=1, mod_name=""  → same package as rel_path
+    from .utils import f → level=1, mod_name="utils"
+    from .. import x     → level=2, mod_name=""  → parent package
+    """
+    parts = list(rel_path.parts)  # e.g. ["a", "b", "c.py"]
+    # Anchor = package directory, going up (level-1) from current package
+    package_parts = parts[:-1]  # remove filename → ["a", "b"]
+    up = level - 1
+    if up > len(package_parts):
+        return None
+    anchor = package_parts[:len(package_parts) - up] if up > 0 else package_parts
+
+    if mod_name:
+        dotted = ".".join(anchor + [mod_name])
+    else:
+        dotted = ".".join(anchor)
+
+    return module_index.get(dotted)
+
+
+def _build_def_index(root: TreeNode) -> tuple[
+    set[str],
+    dict[str, list[str]],
+    dict[str, list[str]],
+    dict[str, dict],
+]:
     """Walk the built tree and return:
-      full_ids       — set of all node_ids (for O(1) existence check)
-      class_index    — short class_name → [node_ids] (for annotation lookup)
+      full_ids       — all node_ids
+      class_index    — short class_name → [node_ids]
+      inherits_index — class_id → [resolved base class_ids] (via class_index)
+      fn_meta        — fn_id → metadata dict (for flow detection)
     """
     full_ids: set[str] = set()
     class_index: dict[str, list[str]] = {}
+    fn_meta: dict[str, dict] = {}
 
     def _walk(node: TreeNode) -> None:
         full_ids.add(node.id)
         if node.kind == "class":
-            label = node.label
-            class_index.setdefault(label, []).append(node.id)
+            class_index.setdefault(node.label, []).append(node.id)
+        elif node.kind == "function":
+            fn_meta[node.id] = dict(node.metadata) if node.metadata else {}
+            fn_meta[node.id]["label"] = node.label
         for child in node.children:
             _walk(child)
 
     _walk(root)
-    return full_ids, class_index
+
+    # Second pass: resolve inherits using class_index
+    inherits_index: dict[str, list[str]] = {}
+
+    def _walk2(node: TreeNode) -> None:
+        if node.kind == "class":
+            bases = node.metadata.get("bases", []) if node.metadata else []
+            resolved: list[str] = []
+            for base_name in bases:
+                short = base_name.split(".")[-1]
+                candidates = class_index.get(short, [])
+                if len(candidates) == 1:
+                    resolved.append(candidates[0])
+            if resolved:
+                inherits_index[node.id] = resolved
+        for child in node.children:
+            _walk2(child)
+
+    _walk2(root)
+    return full_ids, class_index, inherits_index, fn_meta
 
 
 def _resolve_calls(
     file_datas: list[_FileData],
     full_ids: set[str],
     class_index: dict[str, list[str]],
+    inherits_index: dict[str, list[str]],
 ) -> list[EdgeRecord]:
-    """Phase 2: resolve collected call sites to EdgeRecords."""
     edges: list[EdgeRecord] = []
-    seen: set[tuple[str, str]] = set()  # (caller_id, target_id) dedup
+    seen: set[tuple[str, str]] = set()
 
     for fd in file_datas:
         for site in fd.call_sites:
@@ -528,14 +597,11 @@ def _resolve_calls(
             conf = 1.0
 
             if site.call_form == "free":
-                target_id, tier, conf = _resolve_free_call(
-                    site.method, site.caller_id, fd
-                )
-
+                target_id, tier, conf = _resolve_free_call(site.method, fd)
             elif site.call_form == "attr":
                 target_id, tier, conf = _resolve_attr_call(
                     site.receiver, site.method, site.receiver_type,
-                    site.enclosing_class_id, fd, full_ids, class_index
+                    site.enclosing_class_id, fd, full_ids, class_index, inherits_index,
                 )
 
             if target_id is None or target_id not in full_ids:
@@ -562,18 +628,12 @@ def _resolve_calls(
 
 def _resolve_free_call(
     name: str,
-    caller_id: str,
     fd: _FileData,
 ) -> tuple[str | None, str, float]:
-    # 1. Import table: name is an imported symbol
     if name in fd.import_table:
-        candidate, is_module = fd.import_table[name]
+        candidate, _ = fd.import_table[name]
         return candidate, "EXTRACTED", 1.0
-
-    # 2. Local definition: name defined in the same module
-    # caller_id might be "code::mod.py::ClassName::fn" — extract module prefix
-    module_id = fd.module_id
-    local_id = f"{module_id}::{name}"
+    local_id = f"{fd.module_id}::{name}"
     return local_id, "EXTRACTED", 1.0
 
 
@@ -585,32 +645,207 @@ def _resolve_attr_call(
     fd: _FileData,
     full_ids: set[str],
     class_index: dict[str, list[str]],
+    inherits_index: dict[str, list[str]],
 ) -> tuple[str | None, str, float]:
-    # 1. self.method() — look in enclosing class
+    # 1. self.method() — MRO walk in enclosing class
     if receiver_type == "__self__" and enclosing_class_id:
-        candidate = f"{enclosing_class_id}::{method}"
-        if candidate in full_ids:
-            return candidate, "EXTRACTED", 1.0
-        return None, "EXTRACTED", 1.0
+        result = _mro_lookup(enclosing_class_id, method, full_ids, inherits_index)
+        return result, "EXTRACTED", 1.0
 
-    # 2. b.foo() — receiver is in import table
+    # 2. b.foo() — receiver in import table
     if receiver in fd.import_table:
         base_id, is_module = fd.import_table[receiver]
         candidate = f"{base_id}::{method}"
-        if is_module:
-            return candidate, "EXTRACTED", 1.0
-        else:
-            # from x import SomeClass as b; b.method()
-            return candidate, "INFERRED", 0.8
+        tier = "EXTRACTED" if is_module else "INFERRED"
+        conf = 1.0 if is_module else 0.8
+        return candidate, tier, conf
 
-    # 3. obj.method() with type annotation: obj: FooClass
+    # 3. obj.method() with type annotation: obj: FooClass — MRO walk
     if receiver_type and receiver_type != "__self__":
         candidates = class_index.get(receiver_type, [])
         if len(candidates) == 1:
-            candidate = f"{candidates[0]}::{method}"
-            return candidate, "INFERRED", 0.8
+            result = _mro_lookup(candidates[0], method, full_ids, inherits_index)
+            if result:
+                return result, "INFERRED", 0.8
 
     return None, "EXTRACTED", 1.0
+
+
+def _mro_lookup(
+    class_id: str,
+    method: str,
+    full_ids: set[str],
+    inherits_index: dict[str, list[str]],
+    _visited: set[str] | None = None,
+) -> str | None:
+    """BFS up the MRO to find the first ancestor that defines method."""
+    if _visited is None:
+        _visited = set()
+    queue: deque[str] = deque([class_id])
+    while queue:
+        cid = queue.popleft()
+        if cid in _visited:
+            continue
+        _visited.add(cid)
+        candidate = f"{cid}::{method}"
+        if candidate in full_ids:
+            return candidate
+        for base_id in inherits_index.get(cid, []):
+            if base_id not in _visited:
+                queue.append(base_id)
+    return None
+
+
+# ── Phase-3: execution flow detection ─────────────────────────────────────────
+
+def _detect_flows(
+    fn_meta: dict[str, dict],
+    calls_edges: list[EdgeRecord],
+    full_ids: set[str],
+    min_entry_score: float = 0.5,
+    max_entry_points: int = 30,
+    max_depth: int = 8,
+    max_branches: int = 5,
+    min_flow_length: int = 3,
+) -> tuple[list[TreeNode], list[EdgeRecord]]:
+    """Detect execution flows from entry points via BFS on calls graph."""
+    if not calls_edges:
+        return [], []
+
+    # Build adjacency structures from calls edges
+    callees: dict[str, list[str]] = {}   # caller → [callee_ids]
+    caller_count: dict[str, int] = {}    # callee → number of distinct callers
+
+    for e in calls_edges:
+        if e.kind != "calls":
+            continue
+        callees.setdefault(e.source_id, []).append(e.target_id)
+        caller_count[e.target_id] = caller_count.get(e.target_id, 0) + 1
+
+    # Score every function as a potential entry point
+    scored: list[tuple[float, str]] = []
+    for fn_id, meta in fn_meta.items():
+        label = meta.get("label", "")
+        n_callers = caller_count.get(fn_id, 0)
+        n_callees = len(callees.get(fn_id, []))
+        score = _score_entry_point(label, meta, n_callers, n_callees)
+        if score >= min_entry_score:
+            scored.append((score, fn_id))
+
+    scored.sort(reverse=True)
+    candidates = [fn_id for _, fn_id in scored[:max_entry_points]]
+
+    # BFS from each candidate, collect flow steps
+    flow_nodes: list[TreeNode] = []
+    flow_edges: list[EdgeRecord] = []
+    seen_entry_ids: set[str] = set()
+
+    for entry_id in candidates:
+        if entry_id in seen_entry_ids:
+            continue
+
+        steps = _trace_flow_bfs(entry_id, callees, max_depth, max_branches)
+        if len(steps) < min_flow_length:
+            continue
+
+        seen_entry_ids.add(entry_id)
+
+        label = fn_meta.get(entry_id, {}).get("label", entry_id.split("::")[-1])
+        safe_label = label.replace("/", "_").replace(".", "_")
+        # Derive repo name from entry_id: "code::repo_name::..."
+        parts = entry_id.split("::")
+        repo_name = parts[1] if len(parts) > 1 else "repo"
+
+        flow_id = f"code::{repo_name}::flow::{safe_label}"
+        flow_node = TreeNode(
+            id=flow_id,
+            kind="flow",
+            label=f"{label} flow",
+            content="",
+            namespace="code",
+            source_file="",
+            metadata={
+                "entry_point": entry_id,
+                "step_count": len(steps),
+                "steps": steps,
+            },
+        )
+        flow_nodes.append(flow_node)
+
+        for step_id in steps:
+            if step_id not in full_ids:
+                continue
+            flow_edges.append(EdgeRecord(
+                source_id=step_id,
+                target_id=flow_id,
+                kind="step_of",
+                confidence_tier="INFERRED",
+                confidence=0.7,
+                weight=0.7,
+                evidence=["flow_detection"],
+            ))
+
+    # Remove dominated flows (A's steps ⊂ B's steps → remove A)
+    flow_step_sets = [(fn, set(fn.metadata["steps"])) for fn in flow_nodes]
+    kept: list[TreeNode] = []
+    for i, (fn_i, steps_i) in enumerate(flow_step_sets):
+        dominated = any(
+            steps_i < steps_j
+            for j, (fn_j, steps_j) in enumerate(flow_step_sets)
+            if i != j
+        )
+        if not dominated:
+            kept.append(fn_i)
+
+    kept_ids = {fn.id for fn in kept}
+    kept_edges = [e for e in flow_edges if e.target_id in kept_ids]
+
+    return kept, kept_edges
+
+
+def _score_entry_point(
+    label: str,
+    meta: dict,
+    caller_count: int,
+    callee_count: int,
+) -> float:
+    score = 0.0
+    if meta.get("is_exported", False):
+        score += 0.2
+    if caller_count == 0:
+        score += 0.4
+    if callee_count >= 2:
+        score += 0.2
+    name_lower = label.lower()
+    if name_lower in _ENTRY_POINT_NAMES:
+        score += 0.3
+    elif any(name_lower.startswith(p) for p in ("on_", "handle_", "process_", "run_", "dispatch_")):
+        score += 0.25
+    return min(score, 1.0)
+
+
+def _trace_flow_bfs(
+    entry_id: str,
+    callees: dict[str, list[str]],
+    max_depth: int,
+    max_branches: int,
+) -> list[str]:
+    """BFS downstream from entry_id following calls edges. Returns ordered step list."""
+    visited: set[str] = {entry_id}
+    steps: list[str] = [entry_id]
+    queue: deque[tuple[str, int]] = deque([(entry_id, 0)])
+
+    while queue:
+        current, depth = queue.popleft()
+        if depth >= max_depth:
+            continue
+        for callee_id in callees.get(current, [])[:max_branches]:
+            if callee_id not in visited:
+                visited.add(callee_id)
+                steps.append(callee_id)
+                queue.append((callee_id, depth + 1))
+
+    return steps
 
 
 # ── Call site extraction ──────────────────────────────────────────────────────
@@ -621,7 +856,6 @@ def _extract_call_sites(
     param_types: dict[str, str],
     enclosing_class_id: str,
 ) -> list[_CallSite]:
-    """Walk a function body and collect all call expressions."""
     if body is None:
         return []
 
@@ -634,13 +868,9 @@ def _extract_call_sites(
                 if func.type == "identifier":
                     name = func.text.decode("utf-8")
                     sites.append(_CallSite(
-                        caller_id=caller_id,
-                        call_form="free",
-                        callee=name,
-                        receiver="",
-                        method=name,
-                        receiver_type="",
-                        enclosing_class_id="",
+                        caller_id=caller_id, call_form="free",
+                        callee=name, receiver="", method=name,
+                        receiver_type="", enclosing_class_id="",
                     ))
                 elif func.type == "attribute":
                     obj_node = func.child_by_field_name("object")
@@ -650,19 +880,13 @@ def _extract_call_sites(
                         recv = obj_node.text.decode("utf-8")
                         meth = attr_node.text.decode("utf-8")
                         if recv == "self" and enclosing_class_id:
-                            rtype = "__self__"
-                            enc = enclosing_class_id
+                            rtype, enc = "__self__", enclosing_class_id
                         else:
-                            rtype = param_types.get(recv, "")
-                            enc = ""
+                            rtype, enc = param_types.get(recv, ""), ""
                         sites.append(_CallSite(
-                            caller_id=caller_id,
-                            call_form="attr",
-                            callee=f"{recv}.{meth}",
-                            receiver=recv,
-                            method=meth,
-                            receiver_type=rtype,
-                            enclosing_class_id=enc,
+                            caller_id=caller_id, call_form="attr",
+                            callee=f"{recv}.{meth}", receiver=recv, method=meth,
+                            receiver_type=rtype, enclosing_class_id=enc,
                         ))
         for child in node.named_children:
             _walk(child)
@@ -672,30 +896,26 @@ def _extract_call_sites(
 
 
 def _extract_param_type_map(params_node: TSNode | None) -> dict[str, str]:
-    """Return {param_name: type_name} for type-annotated parameters.
-
-    Only captures simple identifier types (e.g. "FooClass"), not generics.
-    """
+    """Return {param_name: type_name} for simply-typed parameters."""
     if params_node is None:
         return {}
     types: dict[str, str] = {}
     for p in params_node.named_children:
         if p.type in ("typed_parameter", "typed_default_parameter"):
-            name_child = p.children[0] if (p.children and p.children[0].type == "identifier") else None
+            name_child = (p.children[0]
+                          if p.children and p.children[0].type == "identifier"
+                          else None)
             type_child = p.child_by_field_name("type")
             if name_child and type_child:
-                param_name = name_child.text.decode("utf-8")
                 type_text = type_child.text.decode("utf-8").strip()
-                # Only map simple identifiers; skip Optional[X], list[X], etc.
                 if type_text.isidentifier():
-                    types[param_name] = type_text
+                    types[name_child.text.decode("utf-8")] = type_text
     return types
 
 
 # ── Tree-sitter helpers ───────────────────────────────────────────────────────
 
 def _unwrap_decorated(node: TSNode) -> tuple[TSNode, list[TSNode]]:
-    """Return (inner definition, decorators) for decorated_definition, else (node, [])."""
     if node.type == "decorated_definition":
         defn = node.child_by_field_name("definition")
         decorators = [c for c in node.named_children if c.type == "decorator"]
@@ -739,7 +959,6 @@ def _extract_param_names(params_node: TSNode) -> list[str]:
 
 
 def _module_own_text(src_bytes: bytes, ts_root: TSNode) -> str:
-    """Module content = everything except class and function bodies."""
     src_text = src_bytes.decode("utf-8", errors="replace")
     lines = src_text.splitlines(keepends=True)
     parts: list[str] = []
