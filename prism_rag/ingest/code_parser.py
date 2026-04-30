@@ -465,20 +465,38 @@ def _build_import_table(
             mod_node = child.child_by_field_name("module_name")
             if mod_node is None:
                 continue
-            mod_raw = mod_node.text.decode("utf-8")
 
-            # Count leading dots for relative imports
-            level = 0
-            for c in child.children:
-                if c.type == ".":
-                    level += 1
-                elif c != mod_node:
-                    break
+            # tree-sitter wraps relative imports in a "relative_import" node
+            if mod_node.type == "relative_import":
+                prefix = mod_node.text.decode("utf-8")   # e.g. "." or ".utils" or ".."
+                level = len(prefix) - len(prefix.lstrip("."))
+                mod_name = prefix.lstrip(".")
+            else:
+                level = 0
+                mod_name = mod_node.text.decode("utf-8")
 
-            mod_name = mod_raw.lstrip(".")
+            if level > 0 and not mod_name:
+                # from . import X  —  each imported name is a submodule
+                for name_node in child.children:
+                    if name_node == mod_node:
+                        continue
+                    if name_node.type in ("identifier", "dotted_name"):
+                        sym = name_node.text.decode("utf-8")
+                        sub_id = _resolve_relative_import(level, sym, rel_path, module_index)
+                        if sub_id:
+                            table[sym] = (sub_id, True)
+                    elif name_node.type == "aliased_import":
+                        inner = name_node.child_by_field_name("name")
+                        alias = name_node.child_by_field_name("alias")
+                        if inner and alias:
+                            sym = inner.text.decode("utf-8")
+                            local = alias.text.decode("utf-8")
+                            sub_id = _resolve_relative_import(level, sym, rel_path, module_index)
+                            if sub_id:
+                                table[local] = (sub_id, True)
+                continue
 
             if level > 0:
-                # Relative import: resolve against current file's package
                 mod_id = _resolve_relative_import(level, mod_name, rel_path, module_index)
             else:
                 mod_id = module_index.get(mod_name) if mod_name else None

@@ -409,3 +409,233 @@ class TestCallsEdgesNotInherits:
         edges = [e for e in result.edges
                  if e.kind == "calls" and e.source_id == e.target_id]
         assert len(edges) == 0
+
+
+# ---------------------------------------------------------------------------
+# Relative import resolution
+# ---------------------------------------------------------------------------
+
+class TestRelativeImports:
+    def test_same_package_from_dot_import(self):
+        # from . import utils  →  resolves to sibling module
+        result, _ = _make_repo({
+            "pkg/__init__.py": "",
+            "pkg/utils.py": "def helper(): pass\n",
+            "pkg/main.py": "from . import utils\ndef caller():\n    utils.helper()\n",
+        })
+        c = _calls(result)
+        assert any(tgt == "helper" and tier == "EXTRACTED" for _, tgt, tier in c)
+
+    def test_same_package_from_dot_name_import(self):
+        # from .utils import helper  →  resolves helper to pkg.utils::helper
+        result, _ = _make_repo({
+            "pkg/__init__.py": "",
+            "pkg/utils.py": "def helper(): pass\n",
+            "pkg/main.py": "from .utils import helper\ndef caller():\n    helper()\n",
+        })
+        c = _calls(result)
+        assert any(src == "caller" and tgt == "helper" and tier == "EXTRACTED"
+                   for src, tgt, tier in c)
+
+    def test_parent_package_from_dotdot_import(self):
+        # from .. import shared  →  resolves to parent package
+        result, _ = _make_repo({
+            "__init__.py": "",
+            "shared.py": "def util(): pass\n",
+            "sub/__init__.py": "",
+            "sub/worker.py": "from .. import shared\ndef run():\n    shared.util()\n",
+        })
+        c = _calls(result)
+        assert any(tgt == "util" for _, tgt, _ in c)
+
+    def test_relative_import_unresolvable_skipped(self):
+        # from ...too_far import x  →  can't go above root, no crash
+        result, _ = _make_repo({
+            "a.py": "from ...missing import gone\ndef f():\n    gone()\n",
+        })
+        # No crash; call to gone() simply not resolved
+        c = _calls(result)
+        assert not any(tgt == "gone" for _, tgt, _ in c)
+
+
+# ---------------------------------------------------------------------------
+# MRO inheritance chain lookup
+# ---------------------------------------------------------------------------
+
+class TestMROInheritance:
+    def test_self_call_resolves_to_parent_method(self):
+        # Child inherits run() from Parent; self.run() in Child::go → Parent::run
+        result, _ = _make_repo({"a.py": """
+            class Parent:
+                def run(self): pass
+
+            class Child(Parent):
+                def go(self):
+                    self.run()
+        """})
+        c = _calls(result)
+        assert any(src == "go" and tgt == "run" and tier == "EXTRACTED"
+                   for src, tgt, tier in c)
+
+    def test_overridden_method_resolves_to_child(self):
+        # Child defines its own run(); self.run() in Child::go → Child::run
+        result, _ = _make_repo({"a.py": """
+            class Parent:
+                def run(self): pass
+
+            class Child(Parent):
+                def run(self): pass
+                def go(self):
+                    self.run()
+        """})
+        edges = [e for e in result.edges
+                 if e.kind == "calls" and e.source_id.endswith("::go")]
+        assert len(edges) == 1
+        assert edges[0].target_id.endswith("::run")
+        # Must resolve to Child::run, not Parent::run
+        assert "Child" in edges[0].target_id
+
+    def test_multi_level_mro(self):
+        # GrandChild → Child → Parent; grandchild.go() calls self.helper() defined only in Parent
+        result, _ = _make_repo({"a.py": """
+            class Parent:
+                def helper(self): pass
+
+            class Child(Parent):
+                pass
+
+            class GrandChild(Child):
+                def go(self):
+                    self.helper()
+        """})
+        c = _calls(result)
+        assert any(src == "go" and tgt == "helper" for src, tgt, _ in c)
+
+    def test_type_annotated_call_uses_mro(self):
+        # obj: Parent → obj.run() resolves via MRO even through subclassing
+        result, _ = _make_repo({
+            "base.py": "class Parent:\n    def run(self): pass\n",
+            "worker.py": textwrap.dedent("""\
+                from base import Parent
+                class Child(Parent):
+                    pass
+                def caller(obj: Parent):
+                    obj.run()
+            """),
+        })
+        c = _calls(result)
+        assert any(tgt == "run" and tier == "INFERRED" for _, tgt, tier in c)
+
+
+# ---------------------------------------------------------------------------
+# Execution flow detection
+# ---------------------------------------------------------------------------
+
+class TestExecutionFlows:
+    def _flows(self, result) -> list:
+        return [n for n in result.nodes if n.kind == "flow"]
+
+    def _step_of_edges(self, result) -> list:
+        return [e for e in result.edges if e.kind == "step_of"]
+
+    def test_entry_point_produces_flow_node(self):
+        # main() with ≥2 callees and 0 callers → entry point → flow node
+        result, _ = _make_repo({"a.py": """
+            def main():
+                step_a()
+                step_b()
+                step_c()
+
+            def step_a(): pass
+            def step_b(): pass
+            def step_c(): pass
+        """})
+        flows = self._flows(result)
+        assert len(flows) >= 1
+
+    def test_flow_node_kind_is_flow(self):
+        result, _ = _make_repo({"a.py": """
+            def main():
+                step_a()
+                step_b()
+                step_c()
+
+            def step_a(): pass
+            def step_b(): pass
+            def step_c(): pass
+        """})
+        for fn in self._flows(result):
+            assert fn.kind == "flow"
+            assert fn.namespace == "code"
+
+    def test_step_of_edges_are_inferred(self):
+        result, _ = _make_repo({"a.py": """
+            def main():
+                step_a()
+                step_b()
+                step_c()
+
+            def step_a(): pass
+            def step_b(): pass
+            def step_c(): pass
+        """})
+        for e in self._step_of_edges(result):
+            assert e.confidence_tier == "INFERRED"
+            assert abs(e.confidence - 0.7) < 1e-9
+
+    def test_short_chain_no_flow(self):
+        # Only 1 callee → chain < min_flow_length=3 → no flow
+        result, _ = _make_repo({"a.py": """
+            def main():
+                only_one()
+
+            def only_one(): pass
+        """})
+        flows = self._flows(result)
+        assert len(flows) == 0
+
+    def test_dominated_flow_removed(self):
+        # run() → [a, b, c, d]; start() → [a, b]; start's steps ⊂ run's steps
+        result, _ = _make_repo({"a.py": """
+            def run():
+                a()
+                b()
+                c()
+                d()
+
+            def start():
+                a()
+                b()
+
+            def a(): pass
+            def b(): pass
+            def c(): pass
+            def d(): pass
+        """})
+        flows = self._flows(result)
+        flow_labels = [fn.label for fn in flows]
+        # run flow should survive; start flow (if it exists) should be dominated
+        # At minimum: if both exist, start's steps must be a strict subset of run's steps
+        if len(flows) > 1:
+            step_sets = [set(fn.metadata["steps"]) for fn in flows]
+            for i, si in enumerate(step_sets):
+                for j, sj in enumerate(step_sets):
+                    if i != j:
+                        assert not (si < sj), "dominated flow was not removed"
+
+    def test_flows_container_node_present(self):
+        # When flows exist, a kind="flows" container is added
+        result, _ = _make_repo({"a.py": """
+            def main():
+                step_a()
+                step_b()
+                step_c()
+
+            def step_a(): pass
+            def step_b(): pass
+            def step_c(): pass
+        """})
+        flows = self._flows(result)
+        if flows:  # flows detected
+            container = [n for n in result.nodes if n.kind == "flows"]
+            assert len(container) == 1
