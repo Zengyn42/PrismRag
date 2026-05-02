@@ -60,12 +60,12 @@ class EmbeddingStore:
             table = self._db.open_table(_TABLE_NAME)
             existing_dim = _detect_dim(table)
             if existing_dim is not None and existing_dim != self._dim:
-                logger.warning(
-                    f"[embedding_store] dim mismatch: table has {existing_dim}, "
-                    f"expected {self._dim} — dropping and recreating."
+                # Auto-adapt to the stored dimension rather than silently wiping data.
+                logger.info(
+                    f"[embedding_store] adapting dim {self._dim} → {existing_dim} "
+                    f"to match existing table"
                 )
-                self._db.drop_table(_TABLE_NAME)
-                return self._db.create_table(_TABLE_NAME, schema=_make_schema(self._dim))
+                self._dim = existing_dim
             return table
         return self._db.create_table(_TABLE_NAME, schema=_make_schema(self._dim))
 
