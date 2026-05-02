@@ -374,3 +374,33 @@ def extract_ast(graph: KnowledgeGraph, docs: list[VaultDocument]) -> None:
         # Note: we don't add edges for aliases since the index already maps them.
         # If we wanted to expose alias relationships in the graph, we'd add
         # 'aliased_as' self-edges or alias nodes, but that's not useful for MVP.
+
+    # Step 5: Tag co-occurrence edges (INFERRED, confidence_score=0.7)
+    # Two tags that appear on the same document are assumed to be related.
+    tag_pairs: dict[tuple[str, str], int] = {}
+    for doc in docs:
+        doc_tags = sorted(set(doc.frontmatter_tags) | _extract_inline_tags(doc.content))
+        for i in range(len(doc_tags)):
+            for j in range(i + 1, len(doc_tags)):
+                pair = (_tag_node_id(doc_tags[i]), _tag_node_id(doc_tags[j]))
+                tag_pairs[pair] = tag_pairs.get(pair, 0) + 1
+
+    for (tag_a, tag_b) in tag_pairs:
+        graph.add_edge(Edge(
+            source=tag_a,
+            target=tag_b,
+            relation="tag_co",
+            confidence="INFERRED",
+            confidence_score=0.7,
+            weight=0.7,
+            source_pass="ast",
+        ))
+        graph.add_edge(Edge(
+            source=tag_b,
+            target=tag_a,
+            relation="tag_co",
+            confidence="INFERRED",
+            confidence_score=0.7,
+            weight=0.7,
+            source_pass="ast",
+        ))

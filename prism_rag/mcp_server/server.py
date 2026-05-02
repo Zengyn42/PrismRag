@@ -56,6 +56,7 @@ _federated: FederatedGraph | None = None
 _bm25_indices: dict[str, BM25Index] = {}
 _embedding_stores: dict = {}   # dict[str, EmbeddingStore]
 _embedder = None               # OllamaEmbedder | GeminiEmbedder | None
+_cross_ns_probe = None         # CrossNamespaceProbe | None
 
 mcp = FastMCP(
     "PrismRag",
@@ -70,10 +71,18 @@ mcp = FastMCP(
 
 
 def _ensure_federated() -> FederatedGraph:
-    global _federated, _bm25_indices, _embedding_stores, _embedder
+    global _federated, _bm25_indices, _embedding_stores, _embedder, _cross_ns_probe
     if _federated is None:
         settings = PrismRagSettings()
-        _federated = FederatedGraph.load(settings.resolved_graphs, settings=settings)
+
+        # Create probe before load so bridge edges are captured at startup
+        from prism_rag.store.cross_namespace_probe import CrossNamespaceProbe
+        log_path = settings.data_dir / "cross_namespace_log.jsonl"
+        _cross_ns_probe = CrossNamespaceProbe(log_path=log_path)
+
+        _federated = FederatedGraph.load(
+            settings.resolved_graphs, settings=settings, probe=_cross_ns_probe
+        )
         logger.info(
             f"[mcp] federated loaded: {_federated.node_count} nodes, "
             f"{_federated.edge_count} edges across {len(_federated.namespaces)} namespaces"
@@ -652,6 +661,69 @@ def impact(
         path_score_fn=score_fn,  # type: ignore[arg-type]
     )
     return format_impact_report(graph, node_id, result, direction)  # type: ignore[arg-type]
+
+
+# -- Tool 8: list_cross_namespace_edges --------------------------------------
+
+
+@mcp.tool()
+def list_cross_namespace_edges(
+    since: str = "",
+    scope: str = "",
+    min_confidence: float = 0.0,
+    allowed_tiers: str = "",
+) -> str:
+    """List cross-namespace bridge edges tracked by the CrossNamespaceProbe.
+
+    Args:
+        since: ISO 8601 datetime string — return only edges first seen at or
+            after this timestamp (e.g. "2026-04-30T00:00:00+00:00").
+            Empty string means return all edges.
+        scope: Restrict to edges where source or target node starts with this
+            namespace prefix (e.g. "code" or "docs"). Empty means all.
+        min_confidence: Minimum confidence score [0.0–1.0] (default 0.0 = no filter).
+        allowed_tiers: Comma-separated confidence tiers to include
+            (e.g. "EXTRACTED,INFERRED"). Empty means all tiers.
+
+    Returns:
+        JSON object with ``total`` count and ``edges`` list, each entry
+        containing edge_id, source_node, target_node, edge_kind,
+        confidence_tier, confidence, and first_seen_at.
+    """
+    _ensure_federated()
+    if _cross_ns_probe is None:
+        return json.dumps({"total": 0, "edges": [], "note": "CrossNamespaceProbe not initialised"})
+
+    tiers: list[str] | None = (
+        [t.strip() for t in allowed_tiers.split(",") if t.strip()]
+        if allowed_tiers.strip()
+        else None
+    )
+
+    if since.strip():
+        try:
+            from datetime import datetime
+            since_dt = datetime.fromisoformat(since.strip())
+            edges = _cross_ns_probe.list_new_cross_edges(since_dt)
+        except ValueError:
+            return json.dumps({"error": f"Invalid ISO datetime: {since!r}"})
+    else:
+        edges = _cross_ns_probe.list_cross_edges(
+            min_confidence=min_confidence,
+            allowed_tiers=tiers,
+        )
+
+    if scope.strip():
+        scope_ns = scope.strip()
+        edges = [
+            e for e in edges
+            if e.source_node.startswith(scope_ns) or e.target_node.startswith(scope_ns)
+        ]
+
+    return json.dumps({
+        "total": len(edges),
+        "edges": [e.to_dict() for e in edges],
+    }, ensure_ascii=False, indent=2)
 
 
 # -- Register ported Obsidian MCP tools (vault_tools.py) ---------------------

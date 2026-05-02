@@ -120,6 +120,7 @@ class FederatedGraph:
         stores: dict[str, "EmbeddingStore"] | None = None,
         bridge_threshold: float = 0.70,
         bridge_top_k: int = 5,
+        probe=None,  # CrossNamespaceProbe | None
     ) -> int:
         """Compute cross-graph bridge edges.
 
@@ -160,6 +161,11 @@ class FederatedGraph:
         # 2. Embedding similarity bridges
         if stores and len(stores) >= 2:
             self._build_embedding_bridges(stores, bridge_threshold, bridge_top_k)
+
+        # Notify probe of all cross-namespace bridge edges
+        if probe is not None:
+            for bridge in self._bridges:
+                probe.on_edge_created(bridge)
 
         logger.info(f"[federated] built {len(self._bridges)} bridge edges across {len(self._graphs)} graphs")
         return len(self._bridges)
@@ -221,7 +227,7 @@ class FederatedGraph:
         logger.info(f"[federated] embedding bridges: {emb_count}")
 
     @classmethod
-    def load(cls, sources: list, settings=None) -> "FederatedGraph":
+    def load(cls, sources: list, settings=None, probe=None) -> "FederatedGraph":
         """Load a FederatedGraph from a list of GraphSource configs.
         Skips sources whose graph.json doesn't exist (logs warning).
         Automatically computes bridge edges after loading.
@@ -262,5 +268,6 @@ class FederatedGraph:
             stores=stores or None,
             bridge_threshold=bridge_threshold,
             bridge_top_k=bridge_top_k,
+            probe=probe,
         )
         return fg
