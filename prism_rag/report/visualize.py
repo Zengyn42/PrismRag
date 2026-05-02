@@ -48,6 +48,7 @@ _COMMUNITY_COLORS = [
 
 # Node shapes by kind
 _KIND_SHAPES = {
+    # vault
     "note": "dot",
     "tag": "diamond",
     "category": "triangle",
@@ -56,6 +57,19 @@ _KIND_SHAPES = {
     "audio": "square",
     "section": "dot",
     "block": "dot",
+    # code
+    "function": "dot",
+    "class": "square",
+    "module": "triangle",
+    "flow": "hexagon",
+}
+
+# Node colors by kind (code namespace gets distinct palette)
+_KIND_COLORS = {
+    "function": "#4363d8",   # blue
+    "class":    "#911eb4",   # purple
+    "module":   "#f58231",   # orange
+    "flow":     "#42d4f4",   # cyan
 }
 
 # Edge colors by confidence
@@ -130,25 +144,42 @@ def generate_html(
         if degree > 10:
             size = 20 + degree * 4
 
-        color = _community_color(community_id)
+        # Code nodes use kind-based colors; vault nodes use community colors
+        if kind in _KIND_COLORS:
+            color = _KIND_COLORS[kind]
+        else:
+            color = _community_color(community_id)
         shape = _KIND_SHAPES.get(kind, "dot")
 
-        # Tooltip: show on hover
+        # Tooltip: show on hover — include code for code nodes
         source_file = data.get("source_file", "")
+        meta = data.get("metadata") or {}
         title = (
             f"<b>{label}</b><br>"
             f"kind: {kind}<br>"
             f"degree: {degree}<br>"
             f"tokens: {tokens}<br>"
-            f"community: {community_id or '—'}<br>"
         )
         if source_file:
-            title += f"file: {source_file}<br>"
+            ls, le = meta.get("line_start"), meta.get("line_end")
+            loc = f":{ls}–{le}" if ls else ""
+            title += f"<i>{source_file}{loc}</i><br>"
+        sig = meta.get("signature")
+        if sig:
+            title += f"<code>{sig[:80]}</code><br>"
+        doc = meta.get("docstring", "")
+        if doc:
+            title += f"{doc.split(chr(10))[0][:100]}<br>"
+        content = data.get("content", "")
+        if content and kind in ("function", "class"):
+            # Show first 8 lines of source
+            lines = content.split("\n")[:8]
+            snippet = "\n".join(lines)
+            title += f"<pre style='font-size:11px;background:#222;color:#eee;padding:4px'>{snippet}</pre>"
 
-        # Skip content from tooltip (too large)
         net.add_node(
             node_id,
-            label=label if kind == "note" else label[:20],
+            label=label[:25],
             title=title,
             size=size,
             color=color,
