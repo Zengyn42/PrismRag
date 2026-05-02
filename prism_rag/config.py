@@ -26,7 +26,7 @@ EmbedBackend = Literal["ollama", "gemini"]
 # Embedding dimensions for known Ollama models (key = model name without :tag or /path prefix).
 # Used by PrismRagSettings.embedding_dim when ollama_embed_dim is 0 (auto-detect).
 OLLAMA_MODEL_DIMS: dict[str, int] = {
-    "qwen3-embedding": 1024,   # #1 MTEB multilingual (Dec 2025), GPU required
+    "qwen3-embedding": 4096,   # #1 MTEB multilingual (Dec 2025), GPU required; default dim=4096
     "bge-m3": 1024,            # dense + sparse + ColBERT, 100+ languages
     "mxbai-embed-large": 1024, # MixedBread, English-focused
     "snowflake-arctic-embed2": 1024,
