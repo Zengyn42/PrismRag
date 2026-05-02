@@ -23,6 +23,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PrivacyTier = Literal["paid", "free"]
 EmbedBackend = Literal["ollama", "gemini"]
 
+# Embedding dimensions for known Ollama models (key = model name without :tag or /path prefix).
+# Used by PrismRagSettings.embedding_dim when ollama_embed_dim is 0 (auto-detect).
+OLLAMA_MODEL_DIMS: dict[str, int] = {
+    "qwen3-embedding": 1024,   # #1 MTEB multilingual (Dec 2025), GPU required
+    "bge-m3": 1024,            # dense + sparse + ColBERT, 100+ languages
+    "mxbai-embed-large": 1024, # MixedBread, English-focused
+    "snowflake-arctic-embed2": 1024,
+    "nomic-embed-text": 768,   # CPU-friendly, 8K context, most downloaded
+    "jina-embeddings-v2-base-en": 768,
+    "paraphrase-multilingual": 768,
+    "granite-embedding": 768,  # IBM multilingual
+    "all-minilm": 384,         # 23M params, fast
+}
+
 
 class GraphSource(BaseModel):
     """Configuration for a single graph source (vault + data directory pair)."""
@@ -68,11 +82,24 @@ class PrismRagSettings(BaseSettings):
     )
     ollama_model: str = Field(
         default="bge-m3",
-        description="Ollama embedding model — must be the same at index time and query time",
+        description="Ollama embedding model — must be the same at index time and query time. "
+                    "Supported: bge-m3 (1024), nomic-embed-text (768), qwen3-embedding (1024), "
+                    "mxbai-embed-large (1024), all-minilm (384).",
+    )
+    ollama_embed_dim: int = Field(
+        default=0,
+        ge=0,
+        description="Ollama embedding dimension override. 0 = auto-detect from model name via OLLAMA_MODEL_DIMS table. "
+                    "Set explicitly when using a model not in the table.",
     )
 
     # Gemini settings (used when embed_backend='gemini')
     gemini_api_key: str = Field(default="", description="Gemini API key")
+    gemini_embed_model: str = Field(
+        default="gemini-embedding-001",
+        description="Gemini embedding model. 'gemini-embedding-001' (text, up to 3072 dims, #1 MTEB) "
+                    "or 'gemini-embedding-2' (multimodal: text/image/video/audio).",
+    )
     privacy_tier: PrivacyTier = Field(
         default="paid",
         description="'paid' requires paid-tier API key (default); 'free' allows free tier (data may be used for training)",
@@ -80,7 +107,9 @@ class PrismRagSettings(BaseSettings):
     embed_dimensionality: int = Field(
         default=768,
         ge=64,
-        description="Gemini embedding output dimension (Matryoshka truncation). Ignored for Ollama (dim=1024).",
+        le=4096,
+        description="Gemini embedding output dimension via MRL truncation (max 3072 for gemini-embedding-001). "
+                    "Ignored for Ollama — use ollama_embed_dim or auto-detection instead.",
     )
 
     # ── Similarity edges (Pass 3, not used in MVP) ───────────────────
@@ -190,10 +219,17 @@ class PrismRagSettings(BaseSettings):
     def embedding_dim(self) -> int:
         """Expected embedding dimension for the configured backend.
 
-        ollama (bge-m3) → 1024
-        gemini           → embed_dimensionality (default 768)
+        gemini → embed_dimensionality (default 768, max 3072)
+        ollama → ollama_embed_dim if non-zero, else OLLAMA_MODEL_DIMS lookup by model name,
+                 else 1024 fallback for unknown models.
         """
-        return 1024 if self.embed_backend == "ollama" else self.embed_dimensionality
+        if self.embed_backend == "gemini":
+            return self.embed_dimensionality
+        if self.ollama_embed_dim > 0:
+            return self.ollama_embed_dim
+        # Strip :tag and path prefix for lookup (e.g. "nomic-embed-text:v1.5" → "nomic-embed-text")
+        base = self.ollama_model.split(":")[0].split("/")[-1]
+        return OLLAMA_MODEL_DIMS.get(base, 1024)
 
     @property
     def resolved_graphs(self) -> list[GraphSource]:

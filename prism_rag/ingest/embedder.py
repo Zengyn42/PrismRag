@@ -2,8 +2,18 @@
 
 Supports two backends selected via PRISM_EMBED_BACKEND env var:
 
-  ollama  (default) — bge-m3 via local Ollama, no API key needed, dim=1024
-  gemini            — gemini-embedding-2-preview, requires PRISM_GEMINI_API_KEY, dim=768
+  ollama  (default) — local Ollama, no API key needed
+                      Recommended models (set via PRISM_OLLAMA_MODEL):
+                        bge-m3               dim=1024  multilingual, 8K ctx (default)
+                        qwen3-embedding:8b   dim=1024  #1 MTEB multilingual (GPU required)
+                        nomic-embed-text     dim=768   CPU-friendly, 8K ctx
+                        mxbai-embed-large    dim=1024  English-focused
+                        all-minilm           dim=384   fast, lightweight
+
+  gemini            — Google Gemini API, requires PRISM_GEMINI_API_KEY
+                      Recommended models (set via PRISM_GEMINI_EMBED_MODEL):
+                        gemini-embedding-001  dim up to 3072  text, #1 MTEB multilingual (default)
+                        gemini-embedding-2    multimodal (text/image/video/audio/PDF)
 
 Both backends expose the same interface:
   compute_embeddings(graph, settings) → dict[node_id, list[float]]
@@ -29,8 +39,8 @@ from prism_rag.store.graph import KnowledgeGraph
 
 logger = logging.getLogger(__name__)
 
-# Gemini Embedding 2 limits
-_GEMINI_MODEL = "gemini-embedding-2-preview"
+# Gemini limits
+_GEMINI_MODEL_DEFAULT = "gemini-embedding-001"  # text, up to 3072 dims; GA May 2026
 _MAX_INPUT_CHARS = 30_000
 _BATCH_SIZE = 20
 _RATE_LIMIT_DELAY = 0.5
@@ -192,7 +202,7 @@ def _compute_embeddings_gemini(
     settings: PrismRagSettings,
     dimensionality: int = 768,
 ) -> dict[str, list[float]]:
-    """Compute embeddings using Gemini Embedding 2 API."""
+    """Compute embeddings using Gemini Embedding API."""
     from google import genai
     from google.genai.types import EmbedContentConfig
 
@@ -208,6 +218,7 @@ def _compute_embeddings_gemini(
             "for model training. Set PRISM_PRIVACY_TIER=paid for production use."
         )
 
+    model_name = getattr(settings, "gemini_embed_model", _GEMINI_MODEL_DEFAULT)
     client = genai.Client(api_key=settings.gemini_api_key)
     config = EmbedContentConfig(output_dimensionality=dimensionality)
 
@@ -218,7 +229,7 @@ def _compute_embeddings_gemini(
 
     logger.info(
         f"[embedder/gemini] computing {len(nodes_to_embed)} embeddings "
-        f"(model={_GEMINI_MODEL}, dim={dimensionality})"
+        f"(model={model_name}, dim={dimensionality})"
     )
     vectors: dict[str, list[float]] = {}
     total = len(nodes_to_embed)
@@ -227,7 +238,7 @@ def _compute_embeddings_gemini(
         truncated = _truncate(content)
         try:
             result = client.models.embed_content(
-                model=_GEMINI_MODEL,
+                model=model_name,
                 contents=truncated,
                 config=config,
             )
