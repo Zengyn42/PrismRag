@@ -452,6 +452,40 @@ def ingest_code(
 
 
 @app.command()
+def canvas(
+    graph: Path = typer.Option(..., "--graph", "-g", help="Path to graph.json"),
+    output: Path = typer.Option(..., "--out", "-o", help="Output .canvas file path"),
+    prefix: str = typer.Option("framework/", "--prefix", "-p",
+                               help="Source-file prefix to include (e.g. 'framework/')"),
+    cols: int = typer.Option(6, "--cols", help="File columns per row in the grid layout"),
+) -> None:
+    """Export a code graph subgraph to an Obsidian Canvas file.
+
+    Groups nodes by source file, stacks them in columns, draws call/inherits/imports edges.
+
+    Example:
+        prism-rag canvas -g data/code/graph.json -o ~/Foundation/NimbusVault/ZenithLoom.canvas
+    """
+    from prism_rag.report.canvas_export import generate_canvas
+
+    if not graph.exists():
+        typer.secho(f"graph.json not found: {graph}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+
+    typer.secho(f"Loading graph from {graph}…", fg=typer.colors.BLUE)
+    kg = KnowledgeGraph.load(graph)
+    typer.secho(f"  {kg.node_count} nodes, {kg.edge_count} edges", fg=typer.colors.GREEN)
+
+    typer.secho(f"Generating canvas (prefix={prefix!r}, cols={cols})…", fg=typer.colors.BLUE)
+    n_nodes, n_edges = generate_canvas(kg, output, filter_prefix=prefix, files_per_row=cols)
+
+    typer.secho(
+        f"  Wrote {n_nodes} cards, {n_edges} edges → {output}",
+        fg=typer.colors.GREEN,
+    )
+
+
+@app.command()
 def version() -> None:
     """Print PrismRag version."""
     typer.echo(f"PrismRag v{__version__}")
