@@ -42,7 +42,9 @@ from prism_rag.config import PrismRagSettings
 from prism_rag.retrieve.bfs import bfs_traverse, federated_bfs
 from prism_rag.retrieve.dfs import dfs_traverse, federated_dfs
 from prism_rag.retrieve.entry import resolve_entry_point, resolve_entry_points
+from prism_rag.retrieve.hybrid import hybrid_search
 from prism_rag.retrieve.impact import format_impact_report, impact_bfs
+from prism_rag.store.bm25_index import BM25Index
 from prism_rag.store.federated import FederatedGraph
 from prism_rag.store.graph import KnowledgeGraph
 
@@ -51,6 +53,9 @@ logger = logging.getLogger(__name__)
 # -- Global state (loaded once at startup) ------------------------------------
 
 _federated: FederatedGraph | None = None
+_bm25_indices: dict[str, BM25Index] = {}
+_embedding_stores: dict = {}   # dict[str, EmbeddingStore]
+_embedder = None               # OllamaEmbedder | GeminiEmbedder | None
 
 mcp = FastMCP(
     "PrismRag",
@@ -65,7 +70,7 @@ mcp = FastMCP(
 
 
 def _ensure_federated() -> FederatedGraph:
-    global _federated
+    global _federated, _bm25_indices, _embedding_stores, _embedder
     if _federated is None:
         settings = PrismRagSettings()
         _federated = FederatedGraph.load(settings.resolved_graphs, settings=settings)
@@ -73,6 +78,40 @@ def _ensure_federated() -> FederatedGraph:
             f"[mcp] federated loaded: {_federated.node_count} nodes, "
             f"{_federated.edge_count} edges across {len(_federated.namespaces)} namespaces"
         )
+
+        # Build BM25 index per namespace
+        for ns in _federated.namespaces:
+            graph = _federated.get_graph(ns)
+            if graph is not None:
+                idx = BM25Index()
+                idx.build(graph)
+                _bm25_indices[ns] = idx
+                logger.info(f"[mcp] bm25 built for {ns}: {graph.node_count} nodes")
+
+        # Load embedding stores per namespace
+        try:
+            from prism_rag.store.embedding_store import EmbeddingStore
+            for src in settings.resolved_graphs:
+                lance_path = src.data_dir / "lance"
+                if lance_path.exists():
+                    store = EmbeddingStore(lance_path, dim=settings.embedding_dim)
+                    if store.count() > 0:
+                        _embedding_stores[src.namespace] = store
+                        logger.info(f"[mcp] embedding store loaded for {src.namespace}: {store.count()} vectors")
+        except Exception as exc:
+            logger.warning(f"[mcp] embedding store unavailable: {exc}")
+
+        # Create query-time embedder (graceful fallback if Ollama/Gemini unavailable)
+        try:
+            from prism_rag.ingest.embedder import OllamaEmbedder
+            _embedder = OllamaEmbedder(
+                model=settings.ollama_model,
+                base_url=settings.ollama_host,
+            )
+            logger.info(f"[mcp] embedder ready: ollama/{settings.ollama_model}")
+        except Exception as exc:
+            logger.warning(f"[mcp] no embedder for hybrid search: {exc}")
+
     return _federated
 
 
@@ -128,8 +167,8 @@ def search_knowledge(
 ) -> str:
     """Search the knowledge graph for information about a topic.
 
-    Finds the best matching entry node, then traverses the graph
-    collecting related nodes up to the token budget.
+    Uses hybrid BM25 + embedding + exact matching (RRF fusion) to find the
+    best entry node, then traverses the graph up to the token budget.
 
     Args:
         query: Natural language query or node name (e.g., "session management", "Colony Coder")
@@ -138,22 +177,47 @@ def search_knowledge(
         scope: Namespace to search (e.g., "nimbus"). Empty = search all.
         ontology_type: Filter results to nodes with this ontology_type (e.g., "decision",
                        "concept", "fact"). Empty string (default) = no filter.
+        min_confidence: Skip edges below this confidence score during traversal (default 0.0).
 
     Returns:
         JSON with entry point, traversed nodes, and their content.
     """
     fg = _ensure_federated()
-    entries = resolve_entry_points(fg, query, scope=scope or None)
-    if not entries:
-        return json.dumps({"error": f"No matching node for query: {query!r}"}, ensure_ascii=False)
 
-    ns, entry_id = entries[0]  # best match
+    # Hybrid entry-point selection: BM25 + embedding + exact, fused via RRF
+    embed_fn = _embedder.embed_query if _embedder is not None else None
+    target_namespaces = [scope] if scope else fg.namespaces
+    entry_candidates: list[tuple[str, str]] = []   # [(ns, node_id), ...]
+    for ns in target_namespaces:
+        graph = fg.get_graph(ns)
+        if graph is None:
+            continue
+        hits = hybrid_search(
+            query,
+            graph,
+            bm25_index=_bm25_indices.get(ns),
+            embed_fn=embed_fn,
+            embedding_store=_embedding_stores.get(ns),
+            top_k=5,
+        )
+        entry_candidates.extend((ns, nid) for nid in hits)
+
+    # Fall back to exact ID resolution if hybrid returned nothing
+    if not entry_candidates:
+        entries = resolve_entry_points(fg, query, scope=scope or None)
+        if not entries:
+            return json.dumps({"error": f"No matching node for query: {query!r}"}, ensure_ascii=False)
+        entry_candidates = entries
+
+    ns, entry_id = entry_candidates[0]
     graph = fg.get_graph(ns)
 
     if mode == "dfs":
-        nodes = federated_dfs(fg, ns, entry_id, budget=budget, scope=scope or None)
+        nodes = federated_dfs(fg, ns, entry_id, budget=budget, scope=scope or None,
+                               min_confidence=min_confidence)
     else:
-        nodes = federated_bfs(fg, ns, entry_id, budget=budget, scope=scope or None)
+        nodes = federated_bfs(fg, ns, entry_id, budget=budget, scope=scope or None,
+                               min_confidence=min_confidence)
 
     # Build node list — include note and knowledge nodes; filter by ontology_type if given
     node_list = []

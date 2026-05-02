@@ -16,18 +16,39 @@ import pyarrow as pa
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA = pa.schema([
-    ("node_id", pa.string()),
-    ("embedding", pa.list_(pa.float32(), 768)),
-])
 _TABLE_NAME = "embeddings"
 
 
-class EmbeddingStore:
-    """Per-namespace embedding store backed by LanceDB."""
+def _make_schema(dim: int) -> pa.Schema:
+    return pa.schema([
+        ("node_id", pa.string()),
+        ("embedding", pa.list_(pa.float32(), dim)),
+    ])
 
-    def __init__(self, lance_path: Path) -> None:
+
+def _detect_dim(table) -> int | None:
+    """Read the embedding dimension from an existing LanceDB table schema."""
+    try:
+        field = table.schema.field("embedding")
+        # pa.list_(pa.float32(), N) → field.type.list_size
+        return field.type.list_size
+    except Exception:
+        return None
+
+
+class EmbeddingStore:
+    """Per-namespace embedding store backed by LanceDB.
+
+    Args:
+        lance_path: Directory for the LanceDB database.
+        dim: Expected embedding dimension. If the existing table has a
+             different dimension, it is dropped and recreated automatically.
+             Default 768 (Gemini); use 1024 for bge-m3 / Ollama.
+    """
+
+    def __init__(self, lance_path: Path, dim: int = 768) -> None:
         self._path = Path(lance_path)
+        self._dim = dim
         self._db = lancedb.connect(str(self._path))
         self._table = self._ensure_table()
 
@@ -36,8 +57,17 @@ class EmbeddingStore:
         # LanceDB >=0.20 returns ListTablesResponse with .tables attribute
         table_names = getattr(existing, "tables", existing)
         if _TABLE_NAME in table_names:
-            return self._db.open_table(_TABLE_NAME)
-        return self._db.create_table(_TABLE_NAME, schema=_SCHEMA)
+            table = self._db.open_table(_TABLE_NAME)
+            existing_dim = _detect_dim(table)
+            if existing_dim is not None and existing_dim != self._dim:
+                logger.warning(
+                    f"[embedding_store] dim mismatch: table has {existing_dim}, "
+                    f"expected {self._dim} — dropping and recreating."
+                )
+                self._db.drop_table(_TABLE_NAME)
+                return self._db.create_table(_TABLE_NAME, schema=_make_schema(self._dim))
+            return table
+        return self._db.create_table(_TABLE_NAME, schema=_make_schema(self._dim))
 
     def upsert(self, node_id: str, embedding: list[float]) -> None:
         """Insert or update an embedding for a node."""

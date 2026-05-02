@@ -242,7 +242,8 @@ class FederatedGraph:
             if lance_path.exists():
                 try:
                     from prism_rag.store.embedding_store import EmbeddingStore as ES
-                    store = ES(lance_path)
+                    embed_dim = getattr(settings, "embedding_dim", 768)
+                    store = ES(lance_path, dim=embed_dim)
                     if store.count() > 0:
                         stores[src.namespace] = store
                         logger.info(f"[federated] loaded embeddings for {src.namespace}: {store.count()} vectors")

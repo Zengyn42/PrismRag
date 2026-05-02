@@ -1,5 +1,8 @@
 # PrismRag Step 1 Completion Implementation Plan
 
+> **[STALE — 2026-04-30]** 本计划的 125 个任务均未勾选，但代码实际上已全部完成（241 个测试全绿）。
+> 该文件不再是有效任务来源。当前任务状态见：`NimbusVault/设计细节/PrismRag v5.0 — 详细设计与任务分解.md`
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Complete the seven remaining pieces of work in PrismRag so it is usable by live agents over MCP, correct under realistic inputs, and forward-compatible with Vault Phase 2 (`knowledge_id`).

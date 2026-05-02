@@ -247,12 +247,15 @@ def _compute_embeddings_gemini(
 def persist_embeddings(
     vectors: dict[str, list[float]],
     lance_path: Path,
+    dim: int = 768,
 ) -> int:
     """Persist computed embeddings to LanceDB.
 
     Args:
         vectors: dict mapping node_id → embedding vector.
         lance_path: Path to LanceDB directory.
+        dim: Embedding dimension; used to detect schema mismatches and
+             drop+recreate the table if needed (e.g. switching 768→1024).
 
     Returns:
         Number of embeddings persisted.
@@ -261,7 +264,7 @@ def persist_embeddings(
         return 0
 
     from prism_rag.store.embedding_store import EmbeddingStore
-    store = EmbeddingStore(lance_path)
+    store = EmbeddingStore(lance_path, dim=dim)
     for node_id, vec in vectors.items():
         store.upsert(node_id, vec)
     logger.info(f"[embedder] persisted {len(vectors)} embeddings to {lance_path}")

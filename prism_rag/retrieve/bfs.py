@@ -105,7 +105,10 @@ def _edge_passes(
     min_confidence: float,
     allowed_tiers: set[str] | None,
 ) -> bool:
-    """Return True if an edge satisfies both confidence filters."""
+    """Return True if an edge satisfies both confidence filters.
+
+    Edge schema: confidence_score (float), confidence (tier string).
+    """
     if float(edge_data.get("confidence_score", 1.0)) < min_confidence:
         return False
     if allowed_tiers is not None:
@@ -122,6 +125,8 @@ def federated_bfs(
     budget: int = 4000,
     max_depth: int = 10,
     scope: str = "",
+    min_confidence: float = 0.0,
+    allowed_tiers: set[str] | None = {"EXTRACTED", "INFERRED"},
 ) -> list[dict]:
     """BFS traversal starting from a node, crossing bridge edges.
 
@@ -131,12 +136,18 @@ def federated_bfs(
     Args:
         scope: If non-empty, restrict traversal to this namespace only
                (no bridge crossing).
+        min_confidence: Skip edges below this confidence score.
+        allowed_tiers: Only traverse edges in these tiers; defaults to
+            EXTRACTED + INFERRED (AMBIGUOUS excluded by default).
     """
     if federated.is_single:
         graph = federated.get_graph(namespace)
         if graph is None:
             return []
-        nodes = bfs_traverse(graph, entry_id, budget=budget, max_depth=max_depth)
+        nodes = bfs_traverse(
+            graph, entry_id, budget=budget, max_depth=max_depth,
+            min_confidence=min_confidence, allowed_tiers=allowed_tiers,
+        )
         for n in nodes:
             n["namespace"] = namespace
         return nodes
@@ -184,12 +195,14 @@ def federated_bfs(
         neighbors: list[tuple[str, float]] = []
         for nbr in uv.neighbors(qid):
             if nbr not in visited:
-                w = float(uv.edges[qid, nbr].get("weight", 1.0))
-                neighbors.append((nbr, w))
+                edata = uv.edges[qid, nbr]
+                if _edge_passes(edata, min_confidence, allowed_tiers):
+                    neighbors.append((nbr, float(edata.get("weight", 1.0))))
         for pred in uv.predecessors(qid):
             if pred not in visited:
-                w = float(uv.edges[pred, qid].get("weight", 1.0))
-                neighbors.append((pred, w))
+                edata = uv.edges[pred, qid]
+                if _edge_passes(edata, min_confidence, allowed_tiers):
+                    neighbors.append((pred, float(edata.get("weight", 1.0))))
 
         neighbors.sort(key=lambda p: p[1], reverse=True)
         for nbr, _ in neighbors:

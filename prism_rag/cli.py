@@ -132,7 +132,7 @@ def ingest(
 
         # Persist embeddings to LanceDB for serve-time bridge computation
         from prism_rag.ingest.embedder import persist_embeddings
-        n_persisted = persist_embeddings(vectors, settings.embedding_cache_path)
+        n_persisted = persist_embeddings(vectors, settings.embedding_cache_path, dim=settings.embedding_dim)
         if n_persisted:
             typer.echo(f"   Persisted {n_persisted} embeddings to LanceDB")
 
@@ -362,6 +362,75 @@ def serve(
     )
     typer.secho(f"🚀 Starting MCP Server (transport={transport})...", fg=typer.colors.GREEN, err=True)
     run_server(transport=transport, port=port)
+
+
+@app.command(name="ingest-code")
+def ingest_code(
+    repo: Path = typer.Option(..., "--repo", "-r", help="Path to source code repository"),
+    data_dir: Path = typer.Option(None, "--data-dir", "-d", help="Output directory (default: PRISM_DATA_DIR/code)"),
+    namespace: str = typer.Option("code", "--namespace", "-n", help="Graph namespace"),
+    skip_cluster: bool = typer.Option(False, "--skip-cluster", help="Skip Leiden clustering"),
+) -> None:
+    """Parse a source code repository and build a code:: knowledge graph.
+
+    Pipeline: Tree-sitter AST → ParseResult → KnowledgeGraph → Leiden → graph.json
+
+    Example:
+        prism-rag ingest-code --repo /home/kingy/Foundation/ZenithLoom
+    """
+    from prism_rag.ingest.code_parser import CodeParser
+    from prism_rag.store.networkx_backend import NetworkXBackend
+
+    repo = repo.expanduser().resolve()
+    if not repo.exists():
+        typer.secho(f"❌ Repo not found: {repo}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    settings = PrismRagSettings()
+    out_dir = (data_dir or settings.data_dir / namespace).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    graph_path = out_dir / "graph.json"
+
+    typer.secho(f"📂 Repo:   {repo}", fg=typer.colors.CYAN)
+    typer.secho(f"📁 Output: {out_dir}", fg=typer.colors.CYAN)
+    typer.secho(f"🏷  Namespace: {namespace}", fg=typer.colors.CYAN)
+    typer.echo("")
+
+    # ── Parse ──
+    typer.secho("🔍 Parsing Python files with Tree-sitter...", fg=typer.colors.BLUE)
+    parser = CodeParser()
+    result = parser.parse(repo)
+    typer.echo(f"   Nodes: {len(result.nodes)} · Edges: {len(result.edges)}")
+
+    # ── Write to KnowledgeGraph ──
+    typer.secho("\n🧩 Building KnowledgeGraph...", fg=typer.colors.BLUE)
+    graph = KnowledgeGraph()
+    backend = NetworkXBackend(graph)
+    backend.write_result(result)
+    typer.echo(f"   Nodes: {graph.node_count} · Edges: {graph.edge_count}")
+
+    # ── Leiden clustering ──
+    if skip_cluster:
+        typer.secho("\n⏭  Leiden clustering (skipped)", fg=typer.colors.YELLOW)
+    else:
+        typer.secho("\n🧠 Leiden community detection...", fg=typer.colors.BLUE)
+        n_communities = run_leiden(
+            graph,
+            resolution=settings.leiden_resolution,
+            seed=settings.leiden_seed,
+            god_nodes_per_community=settings.god_nodes_per_community,
+        )
+        typer.echo(f"   Communities: {n_communities}")
+
+    # ── Persist ──
+    typer.secho("\n💾 Persisting graph...", fg=typer.colors.BLUE)
+    graph.save(graph_path)
+    typer.echo(f"   → {graph_path}")
+
+    typer.secho("\n✅ ingest-code complete.", fg=typer.colors.GREEN)
+    typer.echo(
+        f"   To serve: set PRISM_GRAPHS env var to include {out_dir}, then 'prism-rag serve'"
+    )
 
 
 @app.command()

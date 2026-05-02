@@ -187,6 +187,15 @@ class PrismRagSettings(BaseSettings):
         return self.data_dir / "lance"
 
     @property
+    def embedding_dim(self) -> int:
+        """Expected embedding dimension for the configured backend.
+
+        ollama (bge-m3) → 1024
+        gemini           → embed_dimensionality (default 768)
+        """
+        return 1024 if self.embed_backend == "ollama" else self.embed_dimensionality
+
+    @property
     def resolved_graphs(self) -> list[GraphSource]:
         """Return the list of graph sources to load.
 

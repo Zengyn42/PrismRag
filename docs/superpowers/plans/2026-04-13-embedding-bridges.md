@@ -1,5 +1,7 @@
 # Embedding Similarity Bridges Implementation Plan
 
+> **[STALE — 2026-04-30]** LanceDB embedding 存储和 serve-time bridge edges 已实现（store/embedding_store.py, store/federated.py）。本计划 27 个任务均未勾选但代码已完成，请勿作为执行依据。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Persist node embeddings in LanceDB during ingest, then use them at serve-time to build cross-graph embedding similarity bridge edges.

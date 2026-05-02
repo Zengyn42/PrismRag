@@ -1,5 +1,7 @@
 # Cross-Namespace Traversal Implementation Plan
 
+> **[STALE — 2026-04-30]** 跨 namespace BFS/DFS/trace_path 已在 retrieve/bfs.py, dfs.py 中实现（federated_bfs, federated_dfs）。本计划 34 个任务均未勾选但代码已完成，请勿作为执行依据。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Enable trace_path, BFS, and DFS to traverse across namespace boundaries via bridge edges in the federated multi-graph.

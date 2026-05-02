@@ -1,5 +1,7 @@
 # PrismRag Federated Multi-Graph Implementation Plan
 
+> **[STALE — 2026-04-30]** FederatedGraph 已实现（store/federated.py），跨 namespace 遍历和 bridge edges 已实现。本计划 49 个任务均未勾选但代码已完成，请勿作为执行依据。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement multi-vault federation so a single PrismRag MCP server can load multiple independently-ingested knowledge graphs and query across them via bridge edges.
