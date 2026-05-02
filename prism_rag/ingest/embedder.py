@@ -69,9 +69,11 @@ class OllamaEmbedder:
         self,
         model: str = _OLLAMA_DEFAULT_MODEL,
         base_url: str = _OLLAMA_DEFAULT_HOST,
+        timeout: int = 120,
     ) -> None:
         self.model = model
         self._url = f"{base_url.rstrip('/')}/api/embed"
+        self._timeout = timeout
 
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query string. Raises on failure."""
@@ -93,7 +95,7 @@ class OllamaEmbedder:
             data=payload,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
             body = _json.loads(resp.read())
         embeddings = body.get("embeddings", [])
         if len(embeddings) != len(inputs):
@@ -171,11 +173,15 @@ def compute_embeddings(
         return _compute_embeddings_gemini(graph, settings, settings.embed_dimensionality)
 
 
+_OLLAMA_BATCH_SIZE = 16   # texts per HTTP request; tune to GPU VRAM
+_OLLAMA_TIMEOUT = 300    # seconds per batch request
+
+
 def _compute_embeddings_ollama(
     graph: KnowledgeGraph,
     settings: PrismRagSettings | None = None,
 ) -> dict[str, list[float]]:
-    """Compute embeddings using local Ollama."""
+    """Compute embeddings using local Ollama (batched)."""
     nodes_to_embed = _get_embeddable_nodes(graph)
     if not nodes_to_embed:
         logger.info("[embedder/ollama] no embeddable nodes found")
@@ -183,23 +189,37 @@ def _compute_embeddings_ollama(
 
     model = settings.ollama_model if settings else _OLLAMA_DEFAULT_MODEL
     host = settings.ollama_host if settings else _OLLAMA_DEFAULT_HOST
-    embedder = OllamaEmbedder(model=model, base_url=host)
+    embedder = OllamaEmbedder(model=model, base_url=host, timeout=_OLLAMA_TIMEOUT)
+    total = len(nodes_to_embed)
     logger.info(
-        f"[embedder/ollama] computing {len(nodes_to_embed)} embeddings "
-        f"(model={embedder.model})"
+        f"[embedder/ollama] computing {total} embeddings "
+        f"(model={embedder.model}, batch={_OLLAMA_BATCH_SIZE})"
     )
     vectors: dict[str, list[float]] = {}
-    total = len(nodes_to_embed)
 
-    for i, (node_id, content) in enumerate(nodes_to_embed):
+    for batch_start in range(0, total, _OLLAMA_BATCH_SIZE):
+        batch = nodes_to_embed[batch_start: batch_start + _OLLAMA_BATCH_SIZE]
+        node_ids = [nid for nid, _ in batch]
+        texts = [_truncate(content) for _, content in batch]
         try:
-            vec = embedder.embed_query(_truncate(content))
-            vectors[node_id] = vec
+            vecs = embedder.embed_batch(texts)
+            for nid, vec in zip(node_ids, vecs):
+                vectors[nid] = vec
         except Exception as exc:
-            logger.error(f"[embedder/ollama] node {node_id} failed: {exc}")
-            continue
-        if (i + 1) % 20 == 0 or i + 1 == total:
-            logger.info(f"[embedder/ollama] progress: {i + 1}/{total}")
+            logger.error(
+                f"[embedder/ollama] batch {batch_start}–{batch_start + len(batch) - 1} failed: {exc}"
+                f" — retrying one-by-one"
+            )
+            # Fall back to single-item calls so one bad node doesn't lose the batch
+            for nid, text in zip(node_ids, texts):
+                try:
+                    vectors[nid] = embedder.embed_query(text)
+                except Exception as exc2:
+                    logger.error(f"[embedder/ollama] node {nid} failed: {exc2}")
+
+        done = min(batch_start + _OLLAMA_BATCH_SIZE, total)
+        if done % 160 == 0 or done == total:
+            logger.info(f"[embedder/ollama] progress: {done}/{total}")
 
     logger.info(f"[embedder/ollama] done: {len(vectors)}/{total}")
     return vectors

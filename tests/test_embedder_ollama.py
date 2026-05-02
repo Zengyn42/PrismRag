@@ -156,19 +156,16 @@ def test_compute_embeddings_ollama_returns_dict():
     kg = _kg_with_notes("a", "b")
     settings = PrismRagSettings(embed_backend="ollama", ollama_model="bge-m3")
 
-    call_count = 0
-
     def fake_urlopen(req, timeout=None):
-        nonlocal call_count
-        call_count += 1
-        return _fake_response([_vec()])
+        payload = json.loads(req.data)
+        # Return one vector per input text
+        return _fake_response([_vec()] * len(payload["input"]))
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
         result = compute_embeddings(kg, settings)
 
     assert set(result.keys()) == {"a", "b"}
     assert len(result["a"]) == _DIM
-    assert call_count == 2  # one HTTP call per node (single-item batch)
 
 
 def test_compute_embeddings_ollama_skips_failed_nodes(caplog):
@@ -177,13 +174,16 @@ def test_compute_embeddings_ollama_skips_failed_nodes(caplog):
 
     def fake_urlopen(req, timeout=None):
         payload = json.loads(req.data)
-        if payload["input"] == ["content of bad"]:
+        texts = payload["input"]
+        # Batch fails when "bad" is included; single "good" call succeeds
+        if any("bad" in t for t in texts):
             raise OSError("connection refused")
-        return _fake_response([_vec()])
+        return _fake_response([_vec()] * len(texts))
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
         result = compute_embeddings(kg, settings)
 
+    # "good" succeeds via single fallback; "bad" fails and is skipped
     assert "good" in result
     assert "bad" not in result
 
