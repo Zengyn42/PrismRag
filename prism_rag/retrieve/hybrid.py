@@ -113,6 +113,9 @@ def hybrid_search(
 
     fused = reciprocal_rank_fusion(rankings)
 
+    # ── Filter to nodes that exist in the graph (embedding store may be stale) ─
+    fused = [nid for nid in fused if nid in graph.g]
+
     # ── Namespace filter ─────────────────────────────────────────────────────
     if namespace:
         fused = [
