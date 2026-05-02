@@ -225,13 +225,13 @@ def test_function_content_has_source(tmp_repo: Path) -> None:
     assert "return str(x)" in fn.content
 
 
-def test_class_content_is_header_only(tmp_repo: Path) -> None:
+def test_class_content_is_full_source(tmp_repo: Path) -> None:
     result = CodeParser().parse(tmp_repo)
     base = _find_node(result, "Base")
     assert base is not None
-    # Class content should have header + docstring but NOT method bodies
+    # Class content is the full class source including methods
     assert "class Base" in base.content
-    assert "def __init__" not in base.content
+    assert "def __init__" in base.content
 
 
 # ── Token counts ──────────────────────────────────────────────────────────────

@@ -183,7 +183,7 @@ def _parse_file(
     ts_root = ts_tree.root_node
 
     module_id = f"code::{rel_path.as_posix()}"
-    module_content = _module_own_text(src_bytes, ts_root)
+    module_content = src_text
 
     module_node = TreeNode(
         id=module_id,
@@ -260,9 +260,7 @@ def _parse_class(
     class_header = f"class {class_name}"
     if sup is not None:
         class_header += sup.text.decode("utf-8")
-    class_content = class_header + ":\n"
-    if docstring:
-        class_content += f'    """{docstring}"""\n'
+    class_content = src_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
 
     class_node = TreeNode(
         id=class_id,
