@@ -228,14 +228,15 @@ def search_knowledge(
         nodes = federated_bfs(fg, ns, entry_id, budget=budget, scope=scope or None,
                                min_confidence=min_confidence)
 
-    # Build node list — include note and knowledge nodes; filter by ontology_type if given
+    # Build node list — include all content-bearing kinds; filter by ontology_type if given
+    _CONTENT_KINDS = frozenset({"note", "knowledge", "function", "class", "module", "flow"})
     node_list = []
     for n in nodes:
-        if n.get("kind") not in ("note", "knowledge"):
+        if n.get("kind") not in _CONTENT_KINDS:
             continue
         if ontology_type and n.get("ontology_type") != ontology_type:
             continue
-        node_list.append({
+        entry: dict = {
             "id": f"{ns}::{n['id']}" if not fg.is_single else n["id"],
             "label": n.get("label", n["id"]),
             "kind": n.get("kind", "?"),
@@ -243,7 +244,14 @@ def search_knowledge(
             "tokens": n.get("tokens", 0),
             "community": n.get("community_id", ""),
             "content": n.get("content", "")[:2000],
-        })
+        }
+        # For code nodes, surface structured metadata (signature, file location, callers)
+        meta = n.get("metadata") or {}
+        if meta:
+            entry["signature"] = meta.get("signature")
+            entry["file"] = f"{n.get('source_file', '')}:{meta.get('line_start')}-{meta.get('line_end')}"
+            entry["docstring"] = meta.get("docstring", "")[:300] or None
+        node_list.append(entry)
 
     result = {
         "entry_point": _node_summary(graph, entry_id),
