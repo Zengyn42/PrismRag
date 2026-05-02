@@ -110,11 +110,19 @@ def _truncate(text: str, max_chars: int = _MAX_INPUT_CHARS) -> str:
     return text[:max_chars]
 
 
+_EMBEDDABLE_KINDS = frozenset({
+    # Vault kinds
+    "note", "knowledge", "image", "pdf", "audio",
+    # Code kinds (CodeParser output)
+    "function", "class", "module",
+})
+
+
 def _get_embeddable_nodes(graph: KnowledgeGraph) -> list[tuple[str, str]]:
     """Extract (node_id, content) pairs for all nodes worth embedding.
 
     Rules:
-      - Kind must be content-bearing: note, knowledge, image, pdf, audio
+      - Kind must be content-bearing (see _EMBEDDABLE_KINDS)
       - Content must be non-empty (after strip)
       - Frontmatter.embed == False opts out (Phase 2 tiered embedding)
     """
@@ -122,7 +130,7 @@ def _get_embeddable_nodes(graph: KnowledgeGraph) -> list[tuple[str, str]]:
     for node_id, data in graph.g.nodes(data=True):
         kind = data.get("kind", "")
         content = data.get("content", "")
-        if kind not in ("note", "knowledge", "image", "pdf", "audio"):
+        if kind not in _EMBEDDABLE_KINDS:
             continue
         if not content.strip():
             continue

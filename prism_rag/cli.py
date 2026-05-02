@@ -370,15 +370,17 @@ def ingest_code(
     data_dir: Path = typer.Option(None, "--data-dir", "-d", help="Output directory (default: PRISM_DATA_DIR/code)"),
     namespace: str = typer.Option("code", "--namespace", "-n", help="Graph namespace"),
     skip_cluster: bool = typer.Option(False, "--skip-cluster", help="Skip Leiden clustering"),
+    skip_embed: bool = typer.Option(False, "--skip-embed", help="Skip embedding computation"),
 ) -> None:
     """Parse a source code repository and build a code:: knowledge graph.
 
-    Pipeline: Tree-sitter AST → ParseResult → KnowledgeGraph → Leiden → graph.json
+    Pipeline: Tree-sitter AST → ParseResult → KnowledgeGraph → Leiden → Embed → graph.json
 
     Example:
         prism-rag ingest-code --repo /home/kingy/Foundation/ZenithLoom
     """
     from prism_rag.ingest.code_parser import CodeParser
+    from prism_rag.ingest.embedder import compute_embeddings, persist_embeddings
     from prism_rag.store.networkx_backend import NetworkXBackend
 
     repo = repo.expanduser().resolve()
@@ -421,6 +423,22 @@ def ingest_code(
             god_nodes_per_community=settings.god_nodes_per_community,
         )
         typer.echo(f"   Communities: {n_communities}")
+
+    # ── Embedding ──
+    if skip_embed:
+        typer.secho("\n⏭  Embedding (skipped)", fg=typer.colors.YELLOW)
+    else:
+        typer.secho(
+            f"\n🔢 Computing embeddings ({settings.embed_backend}/{settings.ollama_model if settings.embed_backend == 'ollama' else settings.gemini_embed_model}, dim={settings.embedding_dim})...",
+            fg=typer.colors.BLUE,
+        )
+        try:
+            vectors = compute_embeddings(graph, settings)
+            lance_path = out_dir / "lance"
+            n_persisted = persist_embeddings(vectors, lance_path, dim=settings.embedding_dim)
+            typer.echo(f"   Embeddings: {n_persisted} → {lance_path}")
+        except Exception as exc:
+            typer.secho(f"   ⚠ Embedding failed (continuing): {exc}", fg=typer.colors.YELLOW, err=True)
 
     # ── Persist ──
     typer.secho("\n💾 Persisting graph...", fg=typer.colors.BLUE)
