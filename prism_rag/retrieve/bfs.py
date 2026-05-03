@@ -154,7 +154,7 @@ def federated_bfs(
 
     # Multi-graph: use unified_view
     uv = federated.unified_view
-    entry_qid = f"{namespace}::{entry_id}"
+    entry_qid = federated.qualify_id(namespace, entry_id)
     if entry_qid not in uv:
         return []
 

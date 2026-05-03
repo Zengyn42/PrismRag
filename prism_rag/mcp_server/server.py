@@ -372,8 +372,8 @@ def trace_path(from_node: str, to_node: str, max_length: int = 5) -> str:
     else:
         # Multi-graph: use unified view
         undirected = fg.unified_view.to_undirected()
-        src_qid = f"{src_ns}::{src_id}"
-        tgt_qid = f"{tgt_ns}::{tgt_id}"
+        src_qid = fg.qualify_id(src_ns, src_id)
+        tgt_qid = fg.qualify_id(tgt_ns, tgt_id)
 
     try:
         path = nx.shortest_path(undirected, source=src_qid, target=tgt_qid)
@@ -671,7 +671,36 @@ def impact(
         allowed_edge_kinds=kinds,
         path_score_fn=score_fn,  # type: ignore[arg-type]
     )
-    return format_impact_report(graph, node_id, result, direction)  # type: ignore[arg-type]
+    report = format_impact_report(graph, node_id, result, direction)  # type: ignore[arg-type]
+
+    # Cross-namespace: scan vault graph for mentions_symbol edges pointing to this code node.
+    # These edges live in the vault (nimbus) graph and are invisible to impact_bfs on the code graph.
+    wants_mentions = kinds is None or "mentions_symbol" in kinds
+    if wants_mentions and direction in ("upstream", "both") and ns != "nimbus":
+        vault_g = fg.get_graph("nimbus")
+        if vault_g is not None:
+            mention_lines: list[str] = []
+            for src, tgt, d in vault_g.g.edges(data=True):
+                if d.get("relation") != "mentions_symbol":
+                    continue
+                if tgt != node_id:
+                    continue
+                tier = d.get("confidence", "INFERRED")
+                if tiers and tier not in tiers:
+                    continue
+                score = d.get("confidence_score", 0.0)
+                if score < min_confidence:
+                    continue
+                src_label = vault_g.g.nodes[src].get("label", src)
+                mention_lines.append(f"  - {src_label} [{tier} score={score:.2f}]")
+            if mention_lines:
+                report += (
+                    f"\n\n### Vault documents mentioning `{node_id.split('::')[-1]}` "
+                    f"(cross-namespace mentions_symbol)\n"
+                    + "\n".join(mention_lines)
+                )
+
+    return report
 
 
 # -- Tool 8: list_cross_namespace_edges --------------------------------------
