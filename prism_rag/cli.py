@@ -111,27 +111,39 @@ def ingest(
     typer.echo(f"   PDF nodes: {n_media}")
 
     # ── Pass 3: Embedding + similarity edges ──
+    _embed_ready = (
+        settings.embed_backend == "ollama"
+        or (settings.embed_backend == "gemini" and settings.gemini_api_key)
+    )
     if skip_embed:
         typer.secho("\n⏭  Pass 3: Embedding (skipped by --skip-embed)", fg=typer.colors.YELLOW)
-    elif not settings.gemini_api_key:
+    elif not _embed_ready:
         typer.secho(
-            "\n⏭  Pass 3: Embedding (skipped — no PRISM_GEMINI_API_KEY set)",
+            f"\n⏭  Pass 3: Embedding (skipped — "
+            f"embed_backend={settings.embed_backend!r} requires PRISM_GEMINI_API_KEY)",
             fg=typer.colors.YELLOW,
         )
     else:
-        from prism_rag.ingest.embedder import compute_embeddings
+        from prism_rag.ingest.embedder import compute_embeddings, persist_embeddings
         from prism_rag.ingest.similarity_linker import link_similar_nodes
 
-        typer.secho("\n🧬 Pass 3a: Computing embeddings (Gemini Embedding 2)...", fg=typer.colors.BLUE)
+        _backend_label = (
+            f"ollama/{settings.ollama_model}"
+            if settings.embed_backend == "ollama"
+            else f"gemini/{settings.gemini_embed_model}"
+        )
+        typer.secho(
+            f"\n🧬 Pass 3a: Computing embeddings ({_backend_label}, dim={settings.embedding_dim})...",
+            fg=typer.colors.BLUE,
+        )
         vectors = compute_embeddings(graph, settings)
-        typer.echo(f"   Embedded {len(vectors)} nodes (dim=768)")
+        typer.echo(f"   Embedded {len(vectors)} nodes")
 
         typer.secho("\n🔗 Pass 3b: Generating similarity edges...", fg=typer.colors.BLUE)
         n_new = link_similar_nodes(graph, vectors, settings)
         typer.echo(f"   New edges: {n_new} · Total edges: {graph.edge_count}")
 
         # Persist embeddings to LanceDB for serve-time bridge computation
-        from prism_rag.ingest.embedder import persist_embeddings
         n_persisted = persist_embeddings(vectors, settings.embedding_cache_path, dim=settings.embedding_dim)
         if n_persisted:
             typer.echo(f"   Persisted {n_persisted} embeddings to LanceDB")
