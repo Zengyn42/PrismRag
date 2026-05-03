@@ -66,7 +66,18 @@ mcp = FastMCP(
         "Use search_knowledge for broad queries, explain_node for specific concepts, "
         "trace_path to understand how two concepts connect, list_communities / "
         "explore_community for structural overview, and list_namespaces to see "
-        "all loaded knowledge graphs."
+        "all loaded knowledge graphs. "
+        "IMPORTANT USAGE RULES: "
+        "(1) When a tool returns an error (node not found, no path), report the error "
+        "directly — do not silently substitute an alternative node or answer a different "
+        "question. "
+        "(2) When a query targets a specific node by name, use that exact name. If it is "
+        "not found, say so — do not pick a similar-sounding alternative and present it as "
+        "equivalent. "
+        "(3) After trace_path, check the 'namespace' field of each step to confirm the "
+        "path actually crosses the expected namespace boundaries (e.g. nimbus → code). "
+        "A path that stays inside nimbus (vault docs → tags) is NOT a vault-to-code "
+        "connection even if a tag label matches a code class name."
     ),
 )
 
@@ -280,6 +291,10 @@ def explain_node(node: str, scope: str = "") -> str:
 
     Returns:
         JSON with node details, incoming edges, outgoing edges, and community info.
+        If the node is not found, returns {"error": "Node not found: ..."}.
+        Report this error directly — do not guess an alternative name and retry
+        silently. Old names from renames/refactors (e.g. AgentLoader → EntityLoader)
+        will not be found; report the absence rather than substituting.
     """
     fg = _ensure_federated()
     entries = resolve_entry_points(fg, node, scope=scope or None)
@@ -348,10 +363,24 @@ def trace_path(from_node: str, to_node: str, max_length: int = 5) -> str:
     Args:
         from_node: Starting node (ID, label, partial name, or namespace::node_id)
         to_node: Ending node (ID, label, partial name, or namespace::node_id)
-        max_length: Maximum path length to search (default 5)
+        max_length: Maximum path length to search (default 5). For cross-namespace
+            paths (e.g. vault doc → code class), use max_length=6 or higher since
+            bridge edges add hops.
 
     Returns:
-        JSON with the shortest path as a sequence of nodes and edges.
+        JSON with the shortest path as a sequence of nodes and edges. Each step
+        includes a "namespace" field showing which graph it belongs to.
+
+        Usage rules:
+        - If either endpoint returns "not found", report the error directly.
+          Do not substitute a different node and answer a different question.
+        - After receiving a path, check the "namespace" field of each step.
+          A cross-namespace path (nimbus → code) must contain steps in both
+          namespaces. A path that stays entirely within "nimbus" — even if it
+          passes through a tag node whose label matches a code class name — is
+          NOT a vault-to-code connection.
+        - If no path exists, report "No path found" as-is. Do not fabricate
+          an indirect connection or claim semantic proximity implies a graph path.
     """
     fg = _ensure_federated()
     src_entries = resolve_entry_points(fg, from_node)
