@@ -226,12 +226,18 @@ def search_knowledge(
         )
         entry_candidates.extend((ns, nid) for nid in hits)
 
-    # Fall back to exact ID resolution if hybrid returned nothing
+    # Always try exact/substring name resolution and prepend results.
+    # When the query contains an exact symbol name, label-match precision beats
+    # semantic similarity — prevents returning an unrelated node that happens to
+    # score well on BM25/embedding while the target exists under its exact name.
+    exact_entries = resolve_entry_points(fg, query, scope=scope or None)
+    if exact_entries:
+        existing = {(ns, nid) for ns, nid in entry_candidates}
+        deduped = [(ns, nid) for ns, nid in exact_entries if (ns, nid) not in existing]
+        entry_candidates = deduped + entry_candidates
+
     if not entry_candidates:
-        entries = resolve_entry_points(fg, query, scope=scope or None)
-        if not entries:
-            return json.dumps({"error": f"No matching node for query: {query!r}"}, ensure_ascii=False)
-        entry_candidates = entries
+        return json.dumps({"error": f"No matching node for query: {query!r}"}, ensure_ascii=False)
 
     ns, entry_id = entry_candidates[0]
     graph = fg.get_graph(ns)
