@@ -77,13 +77,22 @@ class FederatedGraph:
             return self._unified
 
         unified = nx.DiGraph()
+        known_ns = set(self._graphs)
+
+        def _qualify(ns: str, node_id: str) -> str:
+            # If node_id already starts with a known namespace prefix, it is
+            # a cross-namespace reference — use as-is to avoid double-prefixing.
+            for other_ns in known_ns:
+                if node_id.startswith(f"{other_ns}::"):
+                    return node_id
+            return f"{ns}::{node_id}"
 
         for ns, kg in self._graphs.items():
             for node_id, data in kg.g.nodes(data=True):
-                qid = f"{ns}::{node_id}"
+                qid = _qualify(ns, node_id)
                 unified.add_node(qid, **{**data, "namespace": ns})
             for src, tgt, data in kg.g.edges(data=True):
-                unified.add_edge(f"{ns}::{src}", f"{ns}::{tgt}", **data)
+                unified.add_edge(_qualify(ns, src), _qualify(ns, tgt), **data)
 
         for bridge in self._bridges:
             src_qid = f"{bridge['source_ns']}::{bridge['source_id']}"

@@ -6,9 +6,7 @@
     "module_args": [
       "serve",
       "--transport", "sse",
-      "--port", "8102",
-      "--vault", "/home/kingy/Foundation/NimbusVault",
-      "--data-dir", "/home/kingy/Foundation/PrismRag/data"
+      "--port", "8102"
     ],
     "url": "http://localhost:8102/sse",
     "shared": true

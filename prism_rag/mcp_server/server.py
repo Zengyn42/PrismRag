@@ -183,7 +183,10 @@ def search_knowledge(
         query: Natural language query or node name (e.g., "session management", "Colony Coder")
         budget: Maximum tokens to return (default 4000)
         mode: Traversal mode — "bfs" (broad context) or "dfs" (follow chains)
-        scope: Namespace to search (e.g., "nimbus"). Empty = search all.
+        scope: Namespace to search. Use "nimbus" for vault design docs / notes,
+               "code" for code implementation details, empty string to search both.
+               When the query is about design intent or architecture, prefer scope="nimbus".
+               When the query is about a specific code symbol or implementation, prefer scope="code".
         ontology_type: Filter results to nodes with this ontology_type (e.g., "decision",
                        "concept", "fact"). Empty string (default) = no filter.
         min_confidence: Skip edges below this confidence score during traversal (default 0.0).
