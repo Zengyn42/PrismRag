@@ -1,12 +1,13 @@
 """PrismRag MCP Server — unified vault + knowledge-graph tools.
 
-Graph query tools (6):
+Graph query tools (7):
   search_knowledge   BFS/DFS traversal from a query → related nodes
   explain_node       All info about a specific node + its neighbors
   trace_path         Shortest path between two nodes
   list_communities   Overview of all Leiden communities
   explore_community  Drill into a specific community's members
   list_namespaces    List all loaded knowledge graph namespaces
+  check_drift        Detect stale vault→code mentions_symbol references
 
 Vault CRUD tools (11) — ported from ZenithLoom's Obsidian MCP:
   read_note          Read a note's content + frontmatter + cas_hash
@@ -764,6 +765,98 @@ def list_cross_namespace_edges(
         "total": len(edges),
         "edges": [e.to_dict() for e in edges],
     }, ensure_ascii=False, indent=2)
+
+
+# -- Tool 9: check_drift --------------------------------------------------------
+
+
+@mcp.tool()
+def check_drift(
+    vault_namespace: str = "nimbus",
+    code_namespace: str = "code",
+    include_valid: bool = False,
+) -> str:
+    """Detect stale symbol references in vault documents (documentation drift).
+
+    Scans every mentions_symbol edge in the vault graph and checks whether the
+    referenced code symbol still exists in the code graph. Returns dangling
+    references where the target was renamed, moved, or deleted after the last
+    link-symbols run.
+
+    Note: this catches *post-link drift* only (symbol gone after link-symbols
+    ran). If vault text references a symbol that was already absent at link
+    time, no edge was ever created, so it won't appear here. Re-running
+    link-symbols after fixing the rename will surface new links.
+
+    Args:
+        vault_namespace: Namespace of the vault (doc) graph. Default "nimbus".
+        code_namespace: Namespace of the code graph. Default "code".
+        include_valid: If True, also include confirmed-valid references in the
+            output. Default False (stale-only is more actionable).
+
+    Returns:
+        JSON with stale_count, valid_count, stale_refs list (and optionally
+        valid_refs). Each stale entry includes the source doc label, the
+        referenced symbol name, confidence tier, score, and full target ID
+        so the caller can cross-check or re-run link-symbols after a fix.
+    """
+    fg = _ensure_federated()
+    vault_g = fg.get_graph(vault_namespace)
+    code_g = fg.get_graph(code_namespace)
+
+    if vault_g is None:
+        return json.dumps(
+            {"error": f"Vault namespace not loaded: {vault_namespace!r}"},
+            ensure_ascii=False,
+        )
+    if code_g is None:
+        return json.dumps(
+            {"error": f"Code namespace not loaded: {code_namespace!r}"},
+            ensure_ascii=False,
+        )
+
+    stale: list[dict] = []
+    valid: list[dict] = []
+
+    for src, tgt, d in vault_g.g.edges(data=True):
+        if d.get("relation") != "mentions_symbol":
+            continue
+
+        src_data = vault_g.g.nodes[src]
+        src_label = src_data.get("label", src)
+        src_file = src_data.get("source_file", "")
+        tier = d.get("confidence", "INFERRED")
+        score = float(d.get("confidence_score", 0.0))
+        # tgt is the full code node ID as stored in vault (e.g. "code::path::ClassName")
+        symbol_name = tgt.split("::")[-1] if "::" in tgt else tgt
+
+        entry = {
+            "doc": src_label,
+            "doc_file": src_file,
+            "symbol": symbol_name,
+            "target_id": tgt,
+            "tier": tier,
+            "score": round(score, 3),
+            "status": "valid" if tgt in code_g.g else "not_found_in_code",
+        }
+        if tgt in code_g.g:
+            valid.append(entry)
+        else:
+            stale.append(entry)
+
+    # Sort stale by score descending so high-confidence broken links surface first
+    stale.sort(key=lambda x: -x["score"])
+
+    result: dict = {
+        "stale_count": len(stale),
+        "valid_count": len(valid),
+        "stale_refs": stale,
+    }
+    if include_valid:
+        valid.sort(key=lambda x: -x["score"])
+        result["valid_refs"] = valid
+
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 # -- Register ported Obsidian MCP tools (vault_tools.py) ---------------------
