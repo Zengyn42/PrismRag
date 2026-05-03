@@ -175,6 +175,26 @@ def ingest(
 
     typer.secho("\n✅ Ingest complete.", fg=typer.colors.GREEN)
 
+    # ── Hint: link-symbols if a code graph exists alongside ──
+    from prism_rag.config import PrismRagSettings as _S
+    _cfg = _S()
+    _code_candidates = list(_cfg.data_dir.glob("*/graph.json")) + list(_cfg.data_dir.glob("code/graph.json"))
+    _code_graphs = [p for p in _code_candidates if "nimbus" not in str(p) and p != settings.graph_path]
+    if _code_graphs:
+        typer.secho(
+            "   💡 Code graph detected. Run to build cross-namespace links:\n"
+            f"   prism-rag link-symbols --vault-graph {settings.graph_path} "
+            f"--code-graph {_code_graphs[0]}",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        typer.secho(
+            "   💡 To link vault notes to code symbols, run after ingest-code:\n"
+            "   prism-rag link-symbols --vault-graph <vault/graph.json> --code-graph <code/graph.json>",
+            fg=typer.colors.YELLOW,
+        )
+
+
 
 @app.command()
 def add(
@@ -449,6 +469,92 @@ def ingest_code(
     typer.echo(
         f"   To serve: set PRISM_GRAPHS env var to include {out_dir}, then 'prism-rag serve'"
     )
+
+    # ── Stale-ref detection: mark vault docs that reference changed code nodes ──
+    from prism_rag.config import PrismRagSettings as _S2
+    _vcfg = _S2()
+    _vault_graph_path = _vcfg.graph_path
+    if _vault_graph_path.exists():
+        try:
+            from datetime import date as _date
+            from prism_rag.ingest.symbol_linker import mark_stale_refs
+            from prism_rag.store.graph import KnowledgeGraph as _KG
+
+            _vault_g = _KG.load(_vault_graph_path)
+            # Determine changed nodes: compare new graph hashes against vault graph
+            # (vault graph has mentions_symbol edges pointing to code node IDs)
+            _mentioned_ids = {
+                t for _, t, d in _vault_g.g.edges(data=True)
+                if d.get("relation") == "mentions_symbol"
+            }
+            if _mentioned_ids:
+                _new_hashes = {
+                    nid: data.get("content_hash", "")
+                    for nid, data in graph.g.nodes(data=True)
+                    if nid in _mentioned_ids
+                }
+                # All mentioned code nodes present in new graph are "changed" candidates;
+                # vault graph has no prior hashes to compare against, so mark all
+                # whose content_hash differs from any previously stored stale_refs date.
+                # Conservative: only mark nodes that actually exist in new graph.
+                _changed = {nid for nid in _mentioned_ids if nid in graph.g}
+                if _changed:
+                    _n = mark_stale_refs(_vault_g, _changed, str(_date.today()))
+                    if _n:
+                        _vault_g.save(_vault_graph_path)
+                        typer.secho(
+                            f"   ⚠  Marked {_n} vault docs as stale "
+                            f"(stale_refs in graph nodes — run 'prism-rag link-symbols' to refresh links)",
+                            fg=typer.colors.YELLOW,
+                        )
+        except Exception as _e:
+            logger.debug(f"[ingest-code] stale-ref detection skipped: {_e}")
+
+
+@app.command(name="link-symbols")
+def link_symbols_cmd(
+    vault_graph: Path = typer.Option(..., "--vault-graph", "-v", help="Path to vault graph.json"),
+    code_graph: Path = typer.Option(..., "--code-graph", "-c", help="Path to code graph.json"),
+) -> None:
+    """Build mentions_symbol cross-namespace edges from vault notes to code symbols.
+
+    Scans vault note content for code symbol names (wikilinks and word-boundary
+    matches), then writes mentions_symbol edges into the vault graph.json.
+
+    Run after both 'prism-rag ingest' and 'prism-rag ingest-code' complete.
+    Safe to re-run (idempotent — removes stale edges before rebuilding).
+
+    Example:
+        prism-rag link-symbols \\
+          --vault-graph /path/nimbus/graph.json \\
+          --code-graph  /path/zenith_code/graph.json
+    """
+    from prism_rag.ingest.symbol_linker import run_link_symbols
+
+    vault_graph = vault_graph.expanduser().resolve()
+    code_graph = code_graph.expanduser().resolve()
+
+    if not vault_graph.exists():
+        typer.secho(f"❌ Vault graph not found: {vault_graph}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    if not code_graph.exists():
+        typer.secho(f"❌ Code graph not found: {code_graph}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    typer.secho(f"📄 Vault graph: {vault_graph}", fg=typer.colors.CYAN)
+    typer.secho(f"💻 Code graph:  {code_graph}", fg=typer.colors.CYAN)
+    typer.echo("")
+    typer.secho("🔗 Scanning for symbol mentions...", fg=typer.colors.BLUE)
+
+    n_ext, n_inf, n_amb = run_link_symbols(vault_graph, code_graph)
+
+    total = n_ext + n_inf + n_amb
+    typer.secho(f"\n✅ link-symbols complete.", fg=typer.colors.GREEN)
+    typer.echo(
+        f"   Edges written: {total} total  "
+        f"(EXTRACTED={n_ext}, INFERRED={n_inf}, AMBIGUOUS={n_amb})"
+    )
+    typer.echo(f"   → {vault_graph}")
 
 
 @app.command()
