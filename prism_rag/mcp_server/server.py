@@ -637,8 +637,6 @@ def list_namespaces() -> str:
             "edges": g.edge_count,
             "communities": len(g.communities),
         }
-        if src:
-            entry["config_path"] = str(src.vault_path)
         # Detect actual indexed top-level dirs from node IDs (more accurate than config).
         # Skip stub nodes that belong to other namespaces (e.g. code:: stubs in nimbus).
         other_ns_prefixes = tuple(f"{other}::" for other in fg.namespaces if other != ns)
