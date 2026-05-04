@@ -98,16 +98,24 @@ def resolve_entry_points(
 
     Returns: List of (namespace, node_id) tuples.
     """
-    # Handle qualified ID
+    # Handle qualified ID ("namespace::node_id" or "ns::path::ClassName")
     if "::" in query:
         ns, _, node_id = query.partition("::")
         graph = federated.get_graph(ns)
-        if graph and node_id in graph.g:
+        if graph is None:
+            return []
+        # Bare lookup (most graph types store without ns prefix)
+        if node_id in graph.g:
             return [(ns, node_id)]
-        if graph:
-            match = resolve_entry_point(graph, node_id)
-            if match:
-                return [(ns, match)]
+        # Code graphs store node IDs *with* the ns:: prefix already embedded
+        # e.g. "code::framework/nodes/llm/claude.py::ClaudeSDKNode" is stored as-is.
+        # Re-qualifying produces the original query string.
+        prefixed = f"{ns}::{node_id}"
+        if prefixed in graph.g:
+            return [(ns, prefixed)]
+        match = resolve_entry_point(graph, node_id)
+        if match:
+            return [(ns, match)]
         return []
 
     # Determine which namespaces to search
