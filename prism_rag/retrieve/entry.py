@@ -38,6 +38,10 @@ def resolve_entry_point(
     query_lower = query.lower().strip()
     if not query_lower:
         return None
+    # Vault node IDs are stored without .md extension; strip it so lookups work
+    # regardless of whether the caller included the file extension.
+    if query_lower.endswith(".md"):
+        query_lower = query_lower[:-3]
 
     # 1. Exact label match (case-insensitive)
     for node_id, data in graph.g.nodes(data=True):
