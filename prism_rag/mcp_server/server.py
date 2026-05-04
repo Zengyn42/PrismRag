@@ -169,7 +169,18 @@ def _federated_node_summary(fg: FederatedGraph, qualified_id: str) -> dict:
     if graph is None:
         return {"id": bare_id, "namespace": ns, "label": bare_id, "kind": "?"}
 
-    summary = _node_summary(graph, bare_id)
+    # Code graph nodes embed the ns:: prefix in their stored IDs.
+    # Try bare_id first, then the reconstructed full ID.
+    node_id = bare_id
+    if node_id not in graph.g:
+        prefixed = f"{ns}::{bare_id}"
+        if prefixed in graph.g:
+            node_id = prefixed
+
+    if node_id not in graph.g:
+        return {"id": bare_id, "namespace": ns, "label": bare_id, "kind": "?"}
+
+    summary = _node_summary(graph, node_id)
     summary["namespace"] = ns
     return summary
 

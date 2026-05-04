@@ -168,7 +168,9 @@ class KnowledgeGraph:
         return int(self.g.number_of_edges())
 
     def degree(self, node_id: str) -> int:
-        return int(self.g.degree(node_id))
+        # Bracket notation avoids NetworkX treating a str as nbunch (iterable),
+        # which would return DiDegreeView instead of an int.
+        return int(self.g.degree[node_id])
 
     # ── Persistence ──────────────────────────────────────────────────
 
