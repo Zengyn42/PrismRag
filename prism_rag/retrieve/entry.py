@@ -12,6 +12,7 @@ Returns the best-matching node ID, or None if no match.
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 from prism_rag.store.graph import KnowledgeGraph
@@ -38,10 +39,14 @@ def resolve_entry_point(
     query_lower = query.lower().strip()
     if not query_lower:
         return None
-    # Vault node IDs are stored without .md extension; strip it so lookups work
-    # regardless of whether the caller included the file extension.
-    if query_lower.endswith(".md"):
-        query_lower = query_lower[:-3]
+    # Vault node IDs are stored without any file extension (vault_loader strips
+    # via Path.with_suffix("") for all types: .md, .pdf, .png, etc.).
+    # Strip any extension UNLESS it contains "::" — that marks a code-namespace
+    # qualified ID like "framework/nodes/llm/claude.py::ClaudeSDKNode" where
+    # ".py::ClaudeSDKNode" is not an extension but a path+symbol suffix.
+    _root, _ext = os.path.splitext(query_lower)
+    if _ext and "::" not in _ext:
+        query_lower = _root
 
     # 1. Exact label match (case-insensitive)
     for node_id, data in graph.g.nodes(data=True):
