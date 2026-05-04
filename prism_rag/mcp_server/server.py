@@ -616,17 +616,31 @@ def explore_community(community: str, ontology_type: str = "") -> str:
 
 @mcp.tool()
 def list_namespaces() -> str:
-    """List all loaded knowledge graph namespaces with statistics."""
+    """List all loaded knowledge graph namespaces with statistics and source coverage.
+
+    Call this before querying a specific namespace to understand what codebase or
+    vault each namespace covers. A node that is not found in a namespace may simply
+    not be indexed there — not missing from the codebase entirely. For example, a
+    "code" namespace built from ZenithLoom will not contain PrismRag classes.
+    """
     fg = _ensure_federated()
+    settings = PrismRagSettings()
+    src_map = {src.namespace: src for src in settings.resolved_graphs}
+
     namespaces = []
     for ns in fg.namespaces:
         g = fg.get_graph(ns)
-        namespaces.append({
+        src = src_map.get(ns)
+        entry: dict = {
             "namespace": ns,
             "nodes": g.node_count,
             "edges": g.edge_count,
             "communities": len(g.communities),
-        })
+        }
+        if src:
+            entry["source_path"] = str(src.vault_path)
+        namespaces.append(entry)
+
     return json.dumps({
         "namespaces": namespaces,
         "bridges": len(fg.bridges),
