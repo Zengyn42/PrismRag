@@ -638,7 +638,21 @@ def list_namespaces() -> str:
             "communities": len(g.communities),
         }
         if src:
-            entry["source_path"] = str(src.vault_path)
+            entry["config_path"] = str(src.vault_path)
+        # Detect actual indexed top-level dirs from node IDs (more accurate than config).
+        # Skip stub nodes that belong to other namespaces (e.g. code:: stubs in nimbus).
+        other_ns_prefixes = tuple(f"{other}::" for other in fg.namespaces if other != ns)
+        own_prefix = f"{ns}::"
+        top_dirs: dict[str, int] = {}
+        for nid in g.g.nodes():
+            if other_ns_prefixes and nid.startswith(other_ns_prefixes):
+                continue  # stub node from another namespace
+            bare = nid[len(own_prefix):] if nid.startswith(own_prefix) else nid
+            parts = bare.split("/")
+            if len(parts) >= 2:
+                top_dirs[parts[0]] = top_dirs.get(parts[0], 0) + 1
+        if top_dirs:
+            entry["indexed_dirs"] = sorted(top_dirs, key=lambda d: -top_dirs[d])[:8]
         namespaces.append(entry)
 
     return json.dumps({
