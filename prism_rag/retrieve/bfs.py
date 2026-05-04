@@ -24,7 +24,7 @@ def bfs_traverse(
     budget: int = 4000,
     max_depth: int = 10,
     min_confidence: float = 0.0,
-    allowed_tiers: set[str] | None = None,
+    allowed_tiers: set[str] | None = frozenset({"EXTRACTED", "INFERRED"}),
 ) -> list[dict]:
     """BFS from entry_id, collecting nodes up to token budget.
 
@@ -34,9 +34,10 @@ def bfs_traverse(
         budget: Maximum total tokens to collect.
         max_depth: Maximum BFS depth (prevents runaway on large graphs).
         min_confidence: Skip edges whose confidence_score is below this value.
-        allowed_tiers: If set, only traverse edges whose confidence tier is in
-            this set (e.g. ``{"EXTRACTED", "INFERRED"}`` skips AMBIGUOUS edges).
-            ``None`` means all tiers pass.
+        allowed_tiers: Only traverse edges whose confidence tier is in this set.
+            Defaults to EXTRACTED + INFERRED (AMBIGUOUS excluded by default,
+            matching federated_bfs / impact_bfs). Pass ``None`` to include all
+            tiers, or pass an explicit set to override.
 
     Returns:
         List of node data dicts (including 'id'), ordered by traversal.

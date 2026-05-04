@@ -379,7 +379,13 @@ def explain_node(node: str, scope: str = "") -> str:
 
 
 @mcp.tool()
-def trace_path(from_node: str, to_node: str, max_length: int = 5) -> str:
+def trace_path(
+    from_node: str,
+    to_node: str,
+    max_length: int = 5,
+    scope: str = "",
+    min_confidence: float = 0.0,
+) -> str:
     """Find the shortest path between two nodes in the knowledge graph.
 
     Supports cross-namespace paths via bridge edges.
@@ -390,6 +396,11 @@ def trace_path(from_node: str, to_node: str, max_length: int = 5) -> str:
         max_length: Maximum path length to search (default 5). For cross-namespace
             paths (e.g. vault doc → code class), use max_length=6 or higher since
             bridge edges add hops.
+        scope: Restrict the search to a single namespace (e.g. "nimbus" or
+            "code"). Empty string (default) searches the unified federated view
+            so cross-namespace paths are returnable.
+        min_confidence: Skip edges whose confidence_score is below this value
+            during shortest-path search (default 0.0 = no filter).
 
     Returns:
         JSON with the shortest path as a sequence of nodes and edges. Each step
@@ -407,8 +418,9 @@ def trace_path(from_node: str, to_node: str, max_length: int = 5) -> str:
           an indirect connection or claim semantic proximity implies a graph path.
     """
     fg = _ensure_federated()
-    src_entries = resolve_entry_points(fg, from_node)
-    tgt_entries = resolve_entry_points(fg, to_node)
+    scope_arg = scope or None
+    src_entries = resolve_entry_points(fg, from_node, scope=scope_arg)
+    tgt_entries = resolve_entry_points(fg, to_node, scope=scope_arg)
 
     if not src_entries:
         return json.dumps({"error": f"Source node not found: {from_node!r}"}, ensure_ascii=False)
@@ -418,7 +430,14 @@ def trace_path(from_node: str, to_node: str, max_length: int = 5) -> str:
     src_ns, src_id = src_entries[0]
     tgt_ns, tgt_id = tgt_entries[0]
 
-    if fg.is_single:
+    if scope:
+        # Scope-restricted: never use the unified view, even in multi-graph mode
+        graph = fg.get_graph(scope)
+        if graph is None:
+            return json.dumps({"error": f"Unknown scope namespace: {scope!r}"}, ensure_ascii=False)
+        undirected = graph.g.to_undirected()
+        src_qid, tgt_qid = src_id, tgt_id
+    elif fg.is_single:
         # Single-graph: use original graph directly (no prefixing)
         graph = fg.get_graph(src_ns)
         undirected = graph.g.to_undirected()
@@ -429,9 +448,18 @@ def trace_path(from_node: str, to_node: str, max_length: int = 5) -> str:
         src_qid = fg.qualify_id(src_ns, src_id)
         tgt_qid = fg.qualify_id(tgt_ns, tgt_id)
 
+    # Apply edge confidence filter as a SubGraph view if needed
+    if min_confidence > 0.0:
+        def _edge_passes(u: str, v: str) -> bool:
+            data = undirected.edges.get((u, v), {})
+            return float(data.get("confidence_score", 1.0)) >= min_confidence
+        search_graph = nx.subgraph_view(undirected, filter_edge=_edge_passes)
+    else:
+        search_graph = undirected
+
     try:
-        path = nx.shortest_path(undirected, source=src_qid, target=tgt_qid)
-    except nx.NetworkXNoPath:
+        path = nx.shortest_path(search_graph, source=src_qid, target=tgt_qid)
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
         return json.dumps({
             "error": "No path found",
             "from": _federated_node_summary(fg, f"{src_ns}::{src_id}"),
@@ -790,6 +818,42 @@ def impact(
                     f"\n\n### Vault documents mentioning `{node_id.split('::')[-1]}` "
                     f"(cross-namespace mentions_symbol)\n"
                     + "\n".join(mention_lines)
+                )
+
+    # Symmetric cross-namespace: from a vault doc, scan outgoing mentions_symbol
+    # edges and enrich the code targets with real metadata from the code graph.
+    # impact_bfs sees these edges, but their endpoints are stub nodes in the
+    # vault graph (label = qualified ID, no signature/file). The code graph has
+    # the real data.
+    if wants_mentions and direction in ("downstream", "both") and ns == "nimbus":
+        code_g = fg.get_graph("code")
+        if code_g is not None:
+            sym_lines: list[str] = []
+            for src, tgt, d in graph.g.edges(data=True):
+                if d.get("relation") != "mentions_symbol":
+                    continue
+                if src != node_id:
+                    continue
+                tier = d.get("confidence", "INFERRED")
+                if tiers and tier not in tiers:
+                    continue
+                score = float(d.get("confidence_score", 0.0))
+                if score < min_confidence:
+                    continue
+                tgt_data = code_g.g.nodes.get(tgt, {})
+                tgt_label = tgt_data.get("label", tgt.split("::")[-1])
+                tgt_kind = tgt_data.get("kind", "?")
+                meta = tgt_data.get("metadata") or {}
+                sig = meta.get("signature", "")
+                sig_str = f" — `{sig}`" if sig else ""
+                sym_lines.append(
+                    f"  - **{tgt_label}** (kind={tgt_kind}){sig_str} [{tier} score={score:.2f}]"
+                )
+            if sym_lines:
+                report += (
+                    f"\n\n### Code symbols mentioned by `{node_id}` "
+                    f"(cross-namespace mentions_symbol)\n"
+                    + "\n".join(sym_lines)
                 )
 
     return report
