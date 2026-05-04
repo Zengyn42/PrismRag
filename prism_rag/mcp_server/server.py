@@ -651,6 +651,18 @@ def list_namespaces() -> str:
                 top_dirs[parts[0]] = top_dirs.get(parts[0], 0) + 1
         if top_dirs:
             entry["indexed_dirs"] = sorted(top_dirs, key=lambda d: -top_dirs[d])[:8]
+        # Sample node IDs so callers can identify which project is indexed
+        sample_nodes = []
+        for nid in g.g.nodes():
+            if other_ns_prefixes and nid.startswith(other_ns_prefixes):
+                continue
+            bare = nid[len(own_prefix):] if nid.startswith(own_prefix) else nid
+            if "/" in bare:
+                sample_nodes.append(nid)
+            if len(sample_nodes) >= 3:
+                break
+        if sample_nodes:
+            entry["sample_node_ids"] = sample_nodes
         namespaces.append(entry)
 
     return json.dumps({
