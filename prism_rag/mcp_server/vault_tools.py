@@ -1149,7 +1149,8 @@ def register_vault_tools(mcp: FastMCP) -> None:
         """Patch one section of a note identified by its heading.
 
         Only the targeted section's content is replaced; all other sections
-        and the frontmatter are preserved unchanged.
+        and the frontmatter are preserved unchanged. After a successful patch
+        the knowledge graph is automatically updated (best-effort).
 
         Args:
             path: Relative path within the vault
@@ -1176,7 +1177,8 @@ def register_vault_tools(mcp: FastMCP) -> None:
         """Merge updates into the note's frontmatter (other fields untouched).
 
         Existing frontmatter keys not listed in ``updates`` are preserved
-        byte-for-byte.
+        byte-for-byte. After a successful update the knowledge graph is
+        automatically updated (best-effort).
 
         Args:
             path: Relative path within the vault
@@ -1250,7 +1252,9 @@ def register_vault_tools(mcp: FastMCP) -> None:
 
         Only the YAML frontmatter ``tags`` list is modified.  Inline ``#tags``
         in the note body are intentionally left untouched — they are considered
-        part of the document prose and must be edited manually.
+        part of the document prose and must be edited manually. After a
+        successful change the knowledge graph is automatically updated
+        (best-effort).
 
         Tags in the ``add`` list that already exist are silently ignored
         (deduplication).  Tags in the ``remove`` list that are absent are
