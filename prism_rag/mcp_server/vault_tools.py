@@ -27,6 +27,7 @@ from typing import List, Optional, Union
 from mcp.server.fastmcp import FastMCP
 
 from prism_rag.config import GraphSource, PrismRagSettings
+from prism_rag.store.graph import _json_default as _vault_json_default
 from prism_rag.vault_ops.audit_log import log_operation
 from prism_rag.vault_ops.cas import (
     CASConflict,
@@ -131,6 +132,7 @@ async def _read_note_impl(path: str, namespace: str = "") -> str:
         }),
         ensure_ascii=False,
         indent=2,
+        default=_vault_json_default,
     )
 
 
@@ -209,6 +211,7 @@ async def _get_frontmatter_impl(path: str, namespace: str = "") -> str:
         ok(data={"frontmatter": fm, "path": path, "namespace": src.namespace}),
         ensure_ascii=False,
         indent=2,
+        default=_vault_json_default,
     )
 
 
