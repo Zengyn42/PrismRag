@@ -19,6 +19,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from prism_rag.store.graph import LifecycleClass
+
+MIGRATION_PENDING = "MIGRATION_PENDING"
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,6 +36,11 @@ class CrossEdgeEntry:
     confidence: float      # [0.0, 1.0]
     first_seen_at: str     # ISO 8601
     evidence: list[str] = field(default_factory=list)
+    last_seen_parsed_at: str = ""
+    source_file: str = ""
+    consecutive_seen: int = 1
+    model_id: str = ""
+    lifecycle_class: str = LifecycleClass.PROBABILISTIC
 
     def to_dict(self) -> dict:
         return asdict(self)
