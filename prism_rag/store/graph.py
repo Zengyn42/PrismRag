@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -74,6 +75,22 @@ OntologyType = Literal[
 ]
 
 
+class LifecycleClass(StrEnum):
+    """Edge lifecycle category — determines who may modify the edge.
+
+    PROBABILISTIC: probe-derived candidates and proposed_mention weak edges.
+        Subject to sweep / rollback / classifier mutation.
+    DETERMINISTIC: parser-managed (e.g. v5.1a SymbolLinker mentions_symbol).
+        Subject to full-overwrite by its owning parser; not touched by others.
+    ANCHORED: human-approved or auto-promoted by EdgeClassifier (Tier 1).
+        Untouchable by any automatic path. Sole termination: physical file delete.
+    """
+
+    PROBABILISTIC = "probabilistic"
+    DETERMINISTIC = "deterministic"
+    ANCHORED = "anchored"
+
+
 @dataclass
 class Node:
     """A single graph node."""
@@ -115,6 +132,7 @@ class Edge:
     confidence_score: float = 1.0
     weight: float = 1.0
     source_pass: SourcePass = "ast"
+    lifecycle_class: str = LifecycleClass.PROBABILISTIC
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
