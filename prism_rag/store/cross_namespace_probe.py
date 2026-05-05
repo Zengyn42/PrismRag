@@ -238,7 +238,22 @@ class CrossNamespaceProbe:
                 line = line.strip()
                 if not line:
                     continue
-                entry = CrossEdgeEntry.from_dict(json.loads(line))
+                d = json.loads(line)
+                d.setdefault("last_seen_at", d.get("first_seen_at", ""))
+                d.setdefault("evidence", [])
+                d.setdefault("consecutive_seen", 1)
+                d.setdefault("last_seen_parsed_at", MIGRATION_PENDING)
+                d.setdefault("model_id", self._model_id)
+                d.setdefault("lifecycle_class", LifecycleClass.PROBABILISTIC)
+                if not d.get("source_file"):
+                    # Back-fill from source_node:
+                    # "code::path/file.py::Symbol" → "path/file.py"
+                    src = d.get("source_node", "")
+                    if "::" in src:
+                        parts = src.split("::")
+                        if len(parts) >= 2:
+                            d["source_file"] = parts[1]
+                entry = CrossEdgeEntry(**d)
                 if entry.edge_id not in self._seen_ids:
                     self._entries.append(entry)
                     self._seen_ids.add(entry.edge_id)
