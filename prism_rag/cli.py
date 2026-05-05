@@ -665,6 +665,35 @@ def migrate_lifecycle(
     typer.echo(f"migrate-lifecycle complete: {migrated} migrated, {skipped} already aligned, 0 blocked")
 
 
+@app.command(name="classify-edges")
+def classify_edges_cmd() -> None:
+    """Run EdgeClassifier on all probe data; write Tier 1 edges + Tier 2 inbox entries."""
+    import logging
+    from prism_rag.config import PrismRagSettings, get_classifier_profile
+    from prism_rag.inbox.store import InboxStore
+    from prism_rag.ingest.edge_classifier import classify_and_route
+    from prism_rag.store.cross_namespace_probe import CrossNamespaceProbe
+    from prism_rag.store.federated import FederatedGraph
+
+    logging.basicConfig(level=logging.INFO)
+    settings = PrismRagSettings()
+    fg = FederatedGraph.load(settings.resolved_graphs)
+    nimbus_src = next((s for s in settings.resolved_graphs if s.namespace == "nimbus"), None)
+    if nimbus_src is None:
+        typer.echo("no 'nimbus' namespace configured; cannot run classifier", err=True)
+        raise typer.Exit(code=1)
+    log_path = settings.data_dir / "cross_namespace_log.jsonl"
+    model_id = getattr(settings, "embedding_model", "default")
+    probe = CrossNamespaceProbe(log_path=log_path, model_id=model_id)
+    inbox = InboxStore(settings.data_dir / "inbox.jsonl")
+    profile = get_classifier_profile(settings, model_id)
+    report = classify_and_route(fg, probe, inbox, nimbus_src, profile)
+    inbox.save_atomic()
+    fg.get_graph("nimbus").save(nimbus_src.graph_path)
+    typer.echo(f"classify-edges: promoted={report.promoted} queued={report.queued} "
+               f"rolled_back={report.rolled_back} discarded={report.discarded}")
+
+
 @app.command()
 def version() -> None:
     """Print PrismRag version."""
