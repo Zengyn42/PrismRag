@@ -279,3 +279,24 @@ def ingest_file(
     }
     logger.info(f"[incremental] done: {result}")
     return result
+
+
+def sweep_deleted_files(graph: KnowledgeGraph, namespace_root: Path) -> int:
+    """Remove graph nodes whose `source_file` no longer exists on disk.
+
+    Idempotent. Returns the number of removed nodes.
+
+    Used by Sprint 1 to clean up after files are soft-deleted (moved to
+    .trash/ or removed entirely). The classifier never directly modifies
+    the graph; it relies on this sweep + atomic save to keep state
+    consistent across the classifier process and the running MCP server.
+    """
+    removed = 0
+    for nid, data in list(graph.g.nodes(data=True)):
+        sf = data.get("source_file", "")
+        if not sf:
+            continue
+        if not (namespace_root / sf).exists():
+            graph.g.remove_node(nid)
+            removed += 1
+    return removed
