@@ -58,3 +58,22 @@ def test_inbox_list_pending_filters(tmp_path: Path):
     s.append(_entry("e3", status="pending", confidence=0.7))
     pending = s.list_pending(top_n=10, sort_by="confidence")
     assert [p["id"] for p in pending] == ["e1", "e3"]
+
+
+from prism_rag.inbox.store import StatusTransitionError
+
+
+def test_set_status_pending_to_approved(tmp_path):
+    s = InboxStore(tmp_path / "inbox.jsonl")
+    s.append(_entry("e1"))
+    s.set_status("e1", "approved", decided_by="user_via_tui", decision_note="ok")
+    assert s.get("e1")["status"] == "approved"
+    assert s.get("e1")["decided_by"] == "user_via_tui"
+
+
+def test_set_status_terminal_blocks_transition(tmp_path):
+    s = InboxStore(tmp_path / "inbox.jsonl")
+    s.append(_entry("e1"))
+    s.set_status("e1", "approved", decided_by="x")
+    with pytest.raises(StatusTransitionError):
+        s.set_status("e1", "rejected", decided_by="y")
