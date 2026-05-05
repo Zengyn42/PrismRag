@@ -165,6 +165,28 @@ class CrossNamespaceProbe:
         if self._log_path is not None:
             self._rewrite_to_disk()
 
+    def sweep(self, source_file: str, scan_timestamp: str) -> int:
+        """Clear consecutive_seen for PROBABILISTIC edges from this source_file
+        that were NOT touched by the current scan.
+
+        ANCHORED / DETERMINISTIC entries are NEVER touched (lifecycle guard).
+        Returns the number of entries cleared.
+        """
+        swept = 0
+        for entry in self._index.values():
+            if entry.lifecycle_class != LifecycleClass.PROBABILISTIC:
+                continue
+            if entry.source_file != source_file:
+                continue
+            if entry.last_seen_parsed_at == scan_timestamp:
+                continue
+            if entry.consecutive_seen > 0:
+                entry.consecutive_seen = 0
+                swept += 1
+        if swept and self._log_path is not None:
+            self._rewrite_to_disk()
+        return swept
+
     # Backward-compat alias for existing callers (FederatedGraph.build_bridges).
     def on_edge_created(self, bridge: dict) -> None:
         """Legacy entrypoint — defaults scan_timestamp to now() for callers

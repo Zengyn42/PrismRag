@@ -128,3 +128,36 @@ def test_record_updates_last_seen_at_on_each_branch():
     # consecutive_seen was 2 from Branch 5; assert it's still 2
     assert p._index[eid].consecutive_seen == 2
     assert p._index[eid].last_seen_parsed_at == "t2"
+
+
+def test_sweep_clears_unseen_probabilistic():
+    p = CrossNamespaceProbe(model_id="bge-m3")
+    p.record(_bridge("a.py::Foo", "doc1"), scan_timestamp="t1")
+    p.record(_bridge("a.py::Bar", "doc2"), scan_timestamp="t1")
+    # New scan: only Foo→doc1 reappears
+    p.record(_bridge("a.py::Foo", "doc1"), scan_timestamp="t2")
+    swept = p.sweep(source_file="a.py", scan_timestamp="t2")
+    assert swept == 1   # Bar→doc2 was not seen
+    foo = next(e for e in p._index.values() if "Foo" in e.source_node)
+    bar = next(e for e in p._index.values() if "Bar" in e.source_node)
+    assert foo.consecutive_seen == 2
+    assert bar.consecutive_seen == 0
+
+
+def test_sweep_skips_anchored():
+    p = CrossNamespaceProbe(model_id="bge-m3")
+    p.record(_bridge("a.py::Foo", "doc1"), scan_timestamp="t1")
+    eid = list(p._index.keys())[0]
+    p._index[eid].lifecycle_class = LifecycleClass.ANCHORED
+    p._index[eid].consecutive_seen = 5
+    p.sweep(source_file="a.py", scan_timestamp="t2")
+    assert p._index[eid].consecutive_seen == 5
+
+
+def test_sweep_only_targets_specified_file():
+    p = CrossNamespaceProbe(model_id="bge-m3")
+    p.record(_bridge("a.py::Foo", "doc1", source_file="a.py"), scan_timestamp="t1")
+    p.record(_bridge("b.py::Bar", "doc2", source_file="b.py"), scan_timestamp="t1")
+    p.sweep(source_file="a.py", scan_timestamp="t2")
+    bar = next(e for e in p._index.values() if "b.py" in e.source_file)
+    assert bar.consecutive_seen == 1   # untouched
