@@ -39,6 +39,7 @@ class CrossEdgeEntry:
     confidence_tier: str   # "EXTRACTED" | "INFERRED" | "AMBIGUOUS"
     confidence: float      # [0.0, 1.0]
     first_seen_at: str     # ISO 8601
+    last_seen_at: str = ""
     evidence: list[str] = field(default_factory=list)
     last_seen_parsed_at: str = ""
     source_file: str = ""
@@ -108,7 +109,9 @@ class CrossNamespaceProbe:
         existing = self._index.get(edge_id)
 
         # Branch 1: ANCHORED short-circuit — keep parsed-at/consec frozen.
+        # Per spec: ANCHORED entries still record probe visibility for stale-detection.
         if existing is not None and existing.lifecycle_class == LifecycleClass.ANCHORED:
+            existing.last_seen_at = now_iso()
             return
 
         if existing is None:
@@ -124,6 +127,7 @@ class CrossNamespaceProbe:
                 confidence_tier=tier,
                 confidence=float(bridge.get("weight", 0.7)),
                 first_seen_at=now_iso(),
+                last_seen_at=now_iso(),
                 last_seen_parsed_at=scan_timestamp,
                 source_file=bridge.get("source_file", ""),
                 consecutive_seen=1,
@@ -138,6 +142,7 @@ class CrossNamespaceProbe:
         elif existing.last_seen_parsed_at == MIGRATION_PENDING:
             # Branch 3: first real confirmation after migration sentinel.
             existing.last_seen_parsed_at = scan_timestamp
+            existing.last_seen_at = now_iso()
             existing.confidence = float(bridge.get("weight", 0.7))
             existing.model_id = self._model_id
             # consecutive_seen stays at 1 (first real confirmation)
@@ -145,12 +150,14 @@ class CrossNamespaceProbe:
             # Branch 4: embedding model changed — reset streak.
             existing.consecutive_seen = 1
             existing.last_seen_parsed_at = scan_timestamp
+            existing.last_seen_at = now_iso()
             existing.model_id = self._model_id
             existing.confidence = float(bridge.get("weight", 0.7))
         elif existing.last_seen_parsed_at != scan_timestamp:
             # Branch 5: same model, new scan — bump streak.
             existing.consecutive_seen += 1
             existing.last_seen_parsed_at = scan_timestamp
+            existing.last_seen_at = now_iso()
         else:
             # Branch 6: same model, same scan — idempotent no-op.
             return

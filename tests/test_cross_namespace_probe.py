@@ -96,3 +96,35 @@ def test_record_migration_pending_overwrite():
     assert e.last_seen_parsed_at == "t-now"
     assert e.consecutive_seen == 1
     assert e.confidence == 0.74
+
+
+def test_record_updates_last_seen_at_on_each_branch():
+    """Verify last_seen_at is refreshed on every mutating branch
+    (including ANCHORED short-circuit, per spec note about visibility tracking).
+    """
+    p = CrossNamespaceProbe(model_id="bge-m3")
+
+    # Branch 2: new entry
+    p.record(_bridge("a.py::Foo", "doc"), scan_timestamp="t1")
+    eid = list(p._index.keys())[0]
+    initial_last_seen = p._index[eid].last_seen_at
+    assert initial_last_seen != ""   # was set on creation
+
+    # Branch 5: new scan increments — last_seen_at must update
+    import time
+    time.sleep(0.01)   # ensure now_iso() yields a different value
+    p.record(_bridge("a.py::Foo", "doc"), scan_timestamp="t2")
+    second_last_seen = p._index[eid].last_seen_at
+    assert second_last_seen != initial_last_seen
+    assert second_last_seen > initial_last_seen   # ISO timestamps sort lexicographically
+
+    # Branch 1: ANCHORED short-circuit — last_seen_at STILL updates (visibility)
+    p._index[eid].lifecycle_class = LifecycleClass.ANCHORED
+    time.sleep(0.01)
+    p.record(_bridge("a.py::Foo", "doc"), scan_timestamp="t3")
+    third_last_seen = p._index[eid].last_seen_at
+    assert third_last_seen != second_last_seen
+    # But consecutive_seen and last_seen_parsed_at unchanged (ANCHORED contract)
+    # consecutive_seen was 2 from Branch 5; assert it's still 2
+    assert p._index[eid].consecutive_seen == 2
+    assert p._index[eid].last_seen_parsed_at == "t2"
