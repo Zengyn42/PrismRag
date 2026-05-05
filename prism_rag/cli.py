@@ -704,5 +704,148 @@ def version() -> None:
     typer.echo(f"PrismRag v{__version__}")
 
 
+# ── Inbox sub-application ───────────────────────────────────────────────────
+
+inbox_app = typer.Typer(help="Inbox management for cross-namespace edge review")
+app.add_typer(inbox_app, name="inbox")
+
+
+@inbox_app.callback(invoke_without_command=True)
+def inbox_default(
+    ctx: typer.Context,
+    status: str = typer.Option("pending", "--status",
+        help="Filter by status: pending|approved|rejected|auto_promoted|discarded|all"),
+    top: int = typer.Option(20, "--top", help="Max entries to show"),
+) -> None:
+    """List inbox entries (default: pending)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    from prism_rag.config import PrismRagSettings
+    from prism_rag.inbox.store import InboxStore
+    settings = PrismRagSettings()
+    inbox = InboxStore(settings.data_dir / "inbox.jsonl")
+    if status == "all":
+        rows = inbox.list_all(status=None, top_n=top)
+    elif status == "pending":
+        rows = inbox.list_pending(top_n=top)
+    else:
+        rows = inbox.list_all(status=status, top_n=top)
+    if not rows:
+        typer.echo(f"(no entries with status={status})")
+        return
+    typer.echo(f"{'[id]':<40} {'[source]':<40} {'[target]':<40} {'[conf]':<6} {'[status]'}")
+    for e in rows:
+        typer.echo(
+            f"{e['id'][:38]:<40} {e['source'][:38]:<40} "
+            f"{e['target'][:38]:<40} {e['confidence']:<6.2f} {e['status']}"
+        )
+
+
+@inbox_app.command(name="show")
+def inbox_show(edge_id: str) -> None:
+    """Show full details of one inbox entry."""
+    from prism_rag.config import PrismRagSettings
+    from prism_rag.inbox.store import InboxStore
+    settings = PrismRagSettings()
+    inbox = InboxStore(settings.data_dir / "inbox.jsonl")
+    entry = inbox.get(edge_id)
+    if entry is None:
+        typer.echo(f"unknown edge_id: {edge_id}", err=True)
+        raise typer.Exit(code=1)
+    import json as _json
+    typer.echo(_json.dumps(entry, ensure_ascii=False, indent=2))
+
+
+def _apply_decision_for_cli(edge_id: str, decision: str, note: str) -> None:
+    from prism_rag.config import PrismRagSettings
+    from prism_rag.inbox.store import InboxStore, StatusTransitionError
+
+    settings = PrismRagSettings()
+    inbox = InboxStore(settings.data_dir / "inbox.jsonl")
+    if inbox.get(edge_id) is None:
+        typer.echo(f"unknown edge_id: {edge_id}", err=True)
+        raise typer.Exit(code=1)
+
+    # Locate nimbus source — may be absent in environments with no graphs configured.
+    nimbus_src = next(
+        (s for s in settings.resolved_graphs if s.namespace == "nimbus"), None
+    )
+
+    try:
+        if decision == "approve" and nimbus_src is not None:
+            # Full approval path: write ANCHORED edge into the vault graph.
+            from prism_rag.inbox.approval import apply_decision
+            from prism_rag.store.federated import FederatedGraph
+
+            fg = FederatedGraph.load(settings.resolved_graphs)
+            apply_decision(
+                edge_id, decision, note,
+                inbox=inbox, fg=fg, src=nimbus_src,
+                decided_by="user_via_cli",
+            )
+            inbox.save_atomic()
+            nimbus = fg.get_graph("nimbus")
+            if nimbus is not None:
+                nimbus.save(nimbus_src.graph_path)
+        else:
+            # Lightweight path: update inbox status only (no graph write).
+            # Used when: decision == "reject" (no graph write needed), or when
+            # no nimbus namespace is configured (approve without graph write).
+            status = "approved" if decision == "approve" else "rejected"
+            inbox.set_status(
+                edge_id, status,
+                decided_by="user_via_cli",
+                decision_note=note,
+            )
+            inbox.save_atomic()
+    except StatusTransitionError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2)
+
+    typer.echo(f"{decision}d: {edge_id}")
+
+
+@inbox_app.command(name="approve")
+def inbox_approve(
+    edge_id: str,
+    note: str = typer.Option("", "--note"),
+) -> None:
+    """Approve a pending edge."""
+    _apply_decision_for_cli(edge_id, "approve", note)
+
+
+@inbox_app.command(name="reject")
+def inbox_reject(
+    edge_id: str,
+    note: str = typer.Option("", "--note"),
+) -> None:
+    """Reject a pending edge."""
+    _apply_decision_for_cli(edge_id, "reject", note)
+
+
+@inbox_app.command(name="approve-all")
+def inbox_approve_all(
+    min_conf: float = typer.Option(0.85, "--min-conf"),
+    top_n: int = typer.Option(0, "--top-n", help="If > 0, only top-N by confidence"),
+    yes: bool = typer.Option(False, "--yes", help="Skip interactive confirmation"),
+) -> None:
+    """Approve all pending edges above a confidence threshold."""
+    from prism_rag.config import PrismRagSettings
+    from prism_rag.inbox.store import InboxStore
+    settings = PrismRagSettings()
+    inbox = InboxStore(settings.data_dir / "inbox.jsonl")
+    pending = [e for e in inbox.list_pending(top_n=999) if e["confidence"] >= min_conf]
+    if top_n > 0:
+        pending = pending[:top_n]
+    if not pending:
+        typer.echo("nothing to approve")
+        return
+    if not yes:
+        typer.echo(f"about to approve {len(pending)} entries; rerun with --yes to proceed")
+        return
+    for e in pending:
+        _apply_decision_for_cli(e["id"], "approve", f"approve-all min_conf={min_conf}")
+
+
 if __name__ == "__main__":
     app()
