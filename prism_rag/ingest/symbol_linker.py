@@ -20,7 +20,7 @@ import logging
 import re
 from pathlib import Path
 
-from prism_rag.store.graph import Edge, KnowledgeGraph
+from prism_rag.store.graph import Edge, KnowledgeGraph, LifecycleClass
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,20 @@ def _scan_wikilinks(content: str) -> set[str]:
     return {m.group(1).strip() for m in _WIKILINK_RE.finditer(content)}
 
 
+def _clear_existing_mentions(graph) -> None:
+    """Remove all non-ANCHORED mentions_symbol edges.
+
+    SymbolLinker owns DETERMINISTIC mentions_symbol edges (full-overwrite on each run).
+    ANCHORED edges (created by EdgeClassifier Tier 1 or human approval) are preserved.
+    """
+    for u, v, d in list(graph.edges(data=True)):
+        if d.get("relation") != "mentions_symbol":
+            continue
+        if d.get("lifecycle_class") == LifecycleClass.ANCHORED:
+            continue
+        graph.remove_edge(u, v)
+
+
 # ── Main linker ────────────────────────────────────────────────────────────────
 
 def link_symbols(
@@ -90,14 +104,12 @@ def link_symbols(
     Returns:
         (n_extracted, n_inferred, n_ambiguous) edge counts.
     """
-    # Idempotency: remove all existing mentions_symbol edges first
-    stale = [
-        (s, t)
-        for s, t, d in vault_graph.g.edges(data=True)
-        if d.get("relation") == _RELATION_MENTIONS
-    ]
-    vault_graph.g.remove_edges_from(stale)
-    logger.debug(f"[symbol_linker] removed {len(stale)} stale mentions_symbol edges")
+    # Idempotency: remove all non-ANCHORED mentions_symbol edges before rewriting.
+    # ANCHORED edges (human-approved / Tier-1 promoted) are preserved.
+    before = vault_graph.g.number_of_edges()
+    _clear_existing_mentions(vault_graph.g)
+    removed = before - vault_graph.g.number_of_edges()
+    logger.debug(f"[symbol_linker] removed {removed} stale mentions_symbol edges")
 
     sym_dict = _build_symbol_dict(code_graph)
     if not sym_dict:
@@ -136,6 +148,7 @@ def link_symbols(
                         confidence=tier,
                         confidence_score=score,
                         weight=1.0, source_pass="ast",
+                        lifecycle_class=LifecycleClass.DETERMINISTIC,
                     ))
                     if tier == "EXTRACTED":
                         n_extracted += 1
@@ -160,6 +173,7 @@ def link_symbols(
                         confidence_score=score,
                         weight=min(1.0, 0.5 + occurrences * 0.1),
                         source_pass="ast",
+                        lifecycle_class=LifecycleClass.DETERMINISTIC,
                     ))
                     if tier == "INFERRED":
                         n_inferred += 1
