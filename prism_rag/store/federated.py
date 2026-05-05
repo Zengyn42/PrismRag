@@ -52,11 +52,10 @@ class FederatedGraph:
         for ns, src in self._sources.items():
             try:
                 current_mtime = src.graph_path.stat().st_mtime
-            except (OSError, TypeError):
-                # OSError covers FileNotFoundError + other stat failures.
-                # TypeError can surface from test harnesses that patch
-                # pathlib.Path.stat without binding self correctly; in either
-                # case we skip this namespace this tick.
+            except OSError:
+                # OSError covers FileNotFoundError, PermissionError, and any
+                # other legitimate I/O failure on stat(); skip this namespace
+                # this tick.
                 continue
             cached = self._mtime_cache.get(ns, 0.0)
             if current_mtime > cached:

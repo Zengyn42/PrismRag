@@ -22,11 +22,25 @@ def test_maybe_reload_throttles_within_500ms(tmp_path):
     src = GraphSource(namespace="ns", vault_path=tmp_path, data_dir=tmp_path)
     _build_simple_graph(src.graph_path)
     fg = FederatedGraph.load([src])
-    with patch("pathlib.Path.stat", wraps=Path.stat) as mock_stat:
+    # Force the throttle window to elapse so the first _maybe_reload would
+    # otherwise re-stat — this isolates the throttle effect across the loop.
+    fg._last_check_at = 0.0
+
+    original_stat = Path.stat
+    call_count = 0
+
+    def counting_stat(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return original_stat(self, *args, **kwargs)
+
+    with patch.object(Path, "stat", counting_stat):
         for _ in range(50):
             fg._maybe_reload()
-        # Within 500ms, stat should be called once at most (initial check)
-        assert mock_stat.call_count <= 1
+    # First call resets _last_check_at and stats N namespaces (here N=1).
+    # Subsequent 49 calls are inside the 500ms window → no stat.
+    # So total stats == 1 (one namespace × one allowed window entry).
+    assert call_count == 1, f"expected exactly 1 stat call, got {call_count}"
 
 
 def test_maybe_reload_picks_up_mtime_change(tmp_path):
