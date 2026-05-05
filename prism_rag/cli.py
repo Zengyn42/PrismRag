@@ -847,5 +847,15 @@ def inbox_approve_all(
         _apply_decision_for_cli(e["id"], "approve", f"approve-all min_conf={min_conf}")
 
 
+@inbox_app.command(name="review")
+def inbox_review() -> None:
+    """Launch interactive TUI to review pending edges."""
+    from prism_rag.config import PrismRagSettings
+    from prism_rag.inbox.tui import InboxReviewApp
+    settings = PrismRagSettings()
+    app_tui = InboxReviewApp(settings.data_dir / "inbox.jsonl", settings)
+    app_tui.run()
+
+
 if __name__ == "__main__":
     app()
