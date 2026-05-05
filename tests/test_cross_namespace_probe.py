@@ -161,3 +161,21 @@ def test_sweep_only_targets_specified_file():
     p.sweep(source_file="a.py", scan_timestamp="t2")
     bar = next(e for e in p._index.values() if "b.py" in e.source_file)
     assert bar.consecutive_seen == 1   # untouched
+
+
+def test_sweep_refuses_empty_source_file_filter():
+    """sweep('') must not mass-clear entries whose source_file is empty."""
+    p = CrossNamespaceProbe(model_id="bge-m3")
+    # Inject a legacy-shape entry with source_file=""
+    eid = "code::a.py::F→nimbus::d"
+    p._index[eid] = CrossEdgeEntry(
+        edge_id=eid, source_node="code::a.py::F", target_node="nimbus::d",
+        edge_kind="embedding_similar", confidence_tier="INFERRED",
+        confidence=0.74, first_seen_at="x",
+        last_seen_parsed_at="t1", source_file="",  # malformed
+        consecutive_seen=3, model_id="bge-m3",
+        lifecycle_class=LifecycleClass.PROBABILISTIC,
+    )
+    swept = p.sweep(source_file="", scan_timestamp="t2")
+    assert swept == 0
+    assert p._index[eid].consecutive_seen == 3   # untouched

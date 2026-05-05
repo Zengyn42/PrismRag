@@ -172,6 +172,10 @@ class CrossNamespaceProbe:
         ANCHORED / DETERMINISTIC entries are NEVER touched (lifecycle guard).
         Returns the number of entries cleared.
         """
+        if not source_file:
+            # Empty filter would silently mass-clear malformed legacy entries
+            # whose source_file is blank. Refuse to act on an empty filter.
+            return 0
         swept = 0
         for entry in self._index.values():
             if entry.lifecycle_class != LifecycleClass.PROBABILISTIC:
@@ -246,13 +250,15 @@ class CrossNamespaceProbe:
                 d.setdefault("model_id", self._model_id)
                 d.setdefault("lifecycle_class", LifecycleClass.PROBABILISTIC)
                 if not d.get("source_file"):
-                    # Back-fill from source_node:
-                    # "code::path/file.py::Symbol" → "path/file.py"
                     src = d.get("source_node", "")
-                    if "::" in src:
-                        parts = src.split("::")
+                    if src.startswith("code::"):
+                        # "code::path/file.py::Symbol" → "path/file.py"
+                        # split with maxsplit=2 robustly handles 4+ part ids
+                        parts = src.split("::", 2)
                         if len(parts) >= 2:
                             d["source_file"] = parts[1]
+                    # nimbus::* / conv::* / other namespaces → leave source_file empty;
+                    # those entries don't have a code-side scan_timestamp to track.
                 entry = CrossEdgeEntry(**d)
                 if entry.edge_id not in self._seen_ids:
                     self._entries.append(entry)
