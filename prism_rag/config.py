@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -35,6 +36,35 @@ OLLAMA_MODEL_DIMS: dict[str, int] = {
     "paraphrase-multilingual": 768,
     "granite-embedding": 768,  # IBM multilingual
     "all-minilm": 384,         # 23M params, fast
+}
+
+
+@dataclass(frozen=True)
+class ClassifierProfile:
+    """Per-embedding-model thresholds for EdgeClassifier tier judgment."""
+
+    tier1_min_conf: float
+    tier1_top_k: int
+    tier1_min_consecutive: int
+    tier2_min_conf: float
+    tier2_margin: float
+    tier2_hard_cap: int
+    tier2_min_consecutive: int
+
+
+_DEFAULT_PROFILES: dict[str, ClassifierProfile] = {
+    "bge-m3": ClassifierProfile(
+        tier1_min_conf=0.75, tier1_top_k=1, tier1_min_consecutive=2,
+        tier2_min_conf=0.70, tier2_margin=0.25, tier2_hard_cap=5, tier2_min_consecutive=2,
+    ),
+    "qwen3-embedding-8b": ClassifierProfile(
+        tier1_min_conf=0.85, tier1_top_k=1, tier1_min_consecutive=2,
+        tier2_min_conf=0.78, tier2_margin=0.20, tier2_hard_cap=5, tier2_min_consecutive=2,
+    ),
+    "default": ClassifierProfile(
+        tier1_min_conf=0.85, tier1_top_k=1, tier1_min_consecutive=2,
+        tier2_min_conf=0.75, tier2_margin=0.25, tier2_hard_cap=5, tier2_min_consecutive=2,
+    ),
 }
 
 
@@ -172,6 +202,12 @@ class PrismRagSettings(BaseSettings):
         description="Federation strategy. Only 'federated' is implemented.",
     )
 
+    # ── EdgeClassifier per-model thresholds ──────────────────────────
+    classifier_profiles: dict[str, ClassifierProfile] = Field(
+        default_factory=lambda: dict(_DEFAULT_PROFILES),
+        description="Per-embedding-model classifier thresholds. Look up by model_id.",
+    )
+
     @field_validator("graphs", mode="before")
     @classmethod
     def _parse_graphs_json(cls, v):
@@ -248,3 +284,8 @@ class PrismRagSettings(BaseSettings):
                 data_dir=self.data_dir,
             )
         ]
+
+
+def get_classifier_profile(settings: PrismRagSettings, model_id: str) -> ClassifierProfile:
+    """Look up classifier profile by model_id; fall back to 'default'."""
+    return settings.classifier_profiles.get(model_id) or settings.classifier_profiles["default"]
