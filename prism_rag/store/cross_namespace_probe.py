@@ -26,6 +26,10 @@ MIGRATION_PENDING = "MIGRATION_PENDING"
 logger = logging.getLogger(__name__)
 
 
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 @dataclass
 class CrossEdgeEntry:
     edge_id: str           # "{src_ns}::{src_id}→{tgt_ns}::{tgt_id}"
@@ -67,54 +71,99 @@ class CrossNamespaceProbe:
         hits  = probe.list_edges_from_node("code::framework/nodes/llm/claude.py")
     """
 
-    def __init__(self, log_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        log_path: Path | None = None,
+        model_id: str = "",
+    ) -> None:
         self._entries: list[CrossEdgeEntry] = []
         self._seen_ids: set[str] = set()
+        self._index: dict[str, CrossEdgeEntry] = {}
+        self._model_id = model_id
         self._log_path = log_path
         if log_path is not None:
             self._load_from_disk()
 
     # ── Write ─────────────────────────────────────────────────────────────
 
-    def on_edge_created(self, bridge: dict) -> None:
-        """Record one bridge dict from FederatedGraph._bridges.
+    def record(self, bridge: dict, scan_timestamp: str) -> None:
+        """Record one bridge dict observed during a scan.
 
-        Bridge dict schema (from build_bridges):
-          source_ns, source_id, target_ns, target_id,
-          relation, confidence (tier str), weight (float)
+        Five-branch state machine + ANCHORED short-circuit:
+          1. ANCHORED  → only refresh visibility (no parsed-at, no consec change).
+          2. New edge  → create with consecutive=1.
+          3. MIGRATION_PENDING sentinel → overwrite with real scan_timestamp.
+          4. Model changed → reset consecutive=1, update confidence + model_id.
+          5. Same model, new scan_timestamp → consecutive++.
+          6. Same model, same scan_timestamp → no-op.
         """
         src_ns = bridge.get("source_ns", "")
         src_id = bridge.get("source_id", "")
         tgt_ns = bridge.get("target_ns", "")
         tgt_id = bridge.get("target_id", "")
-
         if src_ns == tgt_ns:
             return  # within-namespace bridge — not a cross-namespace edge
 
         edge_id = f"{src_ns}::{src_id}→{tgt_ns}::{tgt_id}"
-        if edge_id in self._seen_ids:
-            return  # idempotent
+        existing = self._index.get(edge_id)
 
-        tier = bridge.get("confidence", "INFERRED")
-        if tier not in _VALID_TIERS:
-            tier = "INFERRED"
-        conf = float(bridge.get("weight", 0.7))
+        # Branch 1: ANCHORED short-circuit — keep parsed-at/consec frozen.
+        if existing is not None and existing.lifecycle_class == LifecycleClass.ANCHORED:
+            return
 
-        entry = CrossEdgeEntry(
-            edge_id=edge_id,
-            source_node=f"{src_ns}::{src_id}",
-            target_node=f"{tgt_ns}::{tgt_id}",
-            edge_kind=bridge.get("relation", "bridge"),
-            confidence_tier=tier,
-            confidence=conf,
-            first_seen_at=datetime.now(timezone.utc).isoformat(),
-            evidence=bridge.get("evidence", []),
-        )
-        self._entries.append(entry)
-        self._seen_ids.add(edge_id)
+        if existing is None:
+            # Branch 2: brand new edge.
+            tier = bridge.get("confidence", "INFERRED")
+            if tier not in _VALID_TIERS:
+                tier = "INFERRED"
+            entry = CrossEdgeEntry(
+                edge_id=edge_id,
+                source_node=f"{src_ns}::{src_id}",
+                target_node=f"{tgt_ns}::{tgt_id}",
+                edge_kind=bridge.get("relation", "bridge"),
+                confidence_tier=tier,
+                confidence=float(bridge.get("weight", 0.7)),
+                first_seen_at=now_iso(),
+                last_seen_parsed_at=scan_timestamp,
+                source_file=bridge.get("source_file", ""),
+                consecutive_seen=1,
+                model_id=self._model_id,
+                lifecycle_class=LifecycleClass.PROBABILISTIC,
+                evidence=bridge.get("evidence", []),
+            )
+            self._index[edge_id] = entry
+            # Mirror into legacy list so existing query APIs keep working.
+            self._entries.append(entry)
+            self._seen_ids.add(edge_id)
+        elif existing.last_seen_parsed_at == MIGRATION_PENDING:
+            # Branch 3: first real confirmation after migration sentinel.
+            existing.last_seen_parsed_at = scan_timestamp
+            existing.confidence = float(bridge.get("weight", 0.7))
+            existing.model_id = self._model_id
+            # consecutive_seen stays at 1 (first real confirmation)
+        elif existing.model_id != self._model_id:
+            # Branch 4: embedding model changed — reset streak.
+            existing.consecutive_seen = 1
+            existing.last_seen_parsed_at = scan_timestamp
+            existing.model_id = self._model_id
+            existing.confidence = float(bridge.get("weight", 0.7))
+        elif existing.last_seen_parsed_at != scan_timestamp:
+            # Branch 5: same model, new scan — bump streak.
+            existing.consecutive_seen += 1
+            existing.last_seen_parsed_at = scan_timestamp
+        else:
+            # Branch 6: same model, same scan — idempotent no-op.
+            return
 
         if self._log_path is not None:
-            self._append_to_disk(entry)
+            self._rewrite_to_disk()
+
+    # Backward-compat alias for existing callers (FederatedGraph.build_bridges).
+    def on_edge_created(self, bridge: dict) -> None:
+        """Legacy entrypoint — defaults scan_timestamp to now() for callers
+        that haven't been updated to the new record() signature yet.
+        """
+        self.record(bridge, scan_timestamp=now_iso())
 
     # ── Query ─────────────────────────────────────────────────────────────
 
@@ -164,6 +213,7 @@ class CrossNamespaceProbe:
                 if entry.edge_id not in self._seen_ids:
                     self._entries.append(entry)
                     self._seen_ids.add(entry.edge_id)
+                    self._index[entry.edge_id] = entry
             logger.info(
                 f"[cross_ns_probe] loaded {len(self._entries)} entries from {self._log_path}"
             )
@@ -179,3 +229,23 @@ class CrossNamespaceProbe:
                 f.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
         except Exception as exc:
             logger.warning(f"[cross_ns_probe] failed to append entry: {exc}")
+
+    def _rewrite_to_disk(self) -> None:
+        """Rewrite the entire log atomically.
+
+        Used by record() because the new state-machine semantics mutate
+        existing entries (consecutive_seen, last_seen_parsed_at, …) and
+        cannot be expressed as append-only.
+        """
+        if self._log_path is None:
+            return
+        try:
+            from prism_rag.utils.io import atomic_write
+            lines = "\n".join(
+                json.dumps(e.to_dict(), ensure_ascii=False)
+                for e in self._index.values()
+            )
+            content = (lines + "\n") if lines else ""
+            atomic_write(self._log_path, content)
+        except Exception as exc:
+            logger.warning(f"[cross_ns_probe] failed to rewrite log: {exc}")
