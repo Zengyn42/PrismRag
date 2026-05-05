@@ -6,7 +6,7 @@ See spec §三 / §五 for tier definitions and probe interaction.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from prism_rag.config import ClassifierProfile, GraphSource
@@ -77,10 +77,8 @@ def _now_iso() -> str:
 class ClassifyReport:
     promoted: int = 0
     queued: int = 0
-    upgraded: int = 0
     rolled_back: int = 0
     discarded: int = 0
-    inbox_path: str = ""
 
 
 def _entry_id(probe_entry: CrossEdgeEntry) -> str:
@@ -101,7 +99,7 @@ def classify_and_route(
     profile: ClassifierProfile,
 ) -> ClassifyReport:
     """Walk all probe entries, classify, and route to Tier 1/2/3."""
-    report = ClassifyReport(inbox_path=str(inbox._path))
+    report = ClassifyReport()
 
     # Group by probe source_node (the code symbol) for top-K determination.
     by_src: dict[str, list[CrossEdgeEntry]] = defaultdict(list)
@@ -132,8 +130,9 @@ def classify_and_route(
                 action = _maybe_discard(inbox, entry)
                 if action == "rolled_back":
                     report.rolled_back += 1
-                else:
+                elif action == "noop":
                     report.discarded += 1
+                # "skipped" = StatusTransitionError, don't count
 
     return report
 
@@ -196,7 +195,7 @@ def _upsert_inbox(inbox: InboxStore, entry: CrossEdgeEntry, top_k_rank: int) -> 
             "score": entry.confidence,
             "consecutive_seen": entry.consecutive_seen,
             "first_seen_at": entry.first_seen_at,
-            "last_seen_at": getattr(entry, "last_seen_at", entry.first_seen_at),
+            "last_seen_at": entry.last_seen_at or entry.first_seen_at,
         }],
         top_k_rank=top_k_rank,
         status="pending",

@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
-from prism_rag.ingest.edge_classifier import select_tier2_candidates
-from prism_rag.store.cross_namespace_probe import CrossEdgeEntry
+from prism_rag.config import ClassifierProfile, GraphSource, PrismRagSettings, get_classifier_profile
+from prism_rag.ingest.edge_classifier import (
+    classify_and_route,
+    classify_one,
+    select_tier2_candidates,
+    ClassifyReport,
+    TIER_1,
+    TIER_2,
+    TIER_3,
+)
+from prism_rag.inbox.store import InboxStore
+from prism_rag.store.cross_namespace_probe import CrossEdgeEntry, CrossNamespaceProbe, MIGRATION_PENDING
+from prism_rag.store.federated import FederatedGraph
+from prism_rag.store.graph import KnowledgeGraph, LifecycleClass, Node
 
 
 def _e(conf: float, eid: str = "x") -> CrossEdgeEntry:
@@ -29,12 +42,6 @@ def test_select_hard_cap():
 
 def test_select_empty():
     assert select_tier2_candidates([], margin=0.25, hard_cap=5) == []
-
-
-from prism_rag.config import ClassifierProfile
-from prism_rag.ingest.edge_classifier import classify_one, TIER_1, TIER_2, TIER_3
-from prism_rag.store.cross_namespace_probe import MIGRATION_PENDING
-from prism_rag.store.graph import LifecycleClass
 
 
 _PROFILE = ClassifierProfile(
@@ -89,16 +96,6 @@ def test_classify_tier3_below_min_conf():
     assert classify_one(e, is_top_1=True, profile=_PROFILE) == TIER_3
 
 
-from pathlib import Path
-
-from prism_rag.config import GraphSource, PrismRagSettings, get_classifier_profile
-from prism_rag.ingest.edge_classifier import classify_and_route, ClassifyReport
-from prism_rag.inbox.store import InboxStore
-from prism_rag.store.cross_namespace_probe import CrossNamespaceProbe
-from prism_rag.store.federated import FederatedGraph
-from prism_rag.store.graph import KnowledgeGraph, Node
-
-
 def test_classify_and_route_first_run_all_noop_due_to_migration_pending(tmp_path):
     src = GraphSource(namespace="nimbus", vault_path=tmp_path, data_dir=tmp_path)
     g = KnowledgeGraph()
@@ -108,7 +105,6 @@ def test_classify_and_route_first_run_all_noop_due_to_migration_pending(tmp_path
 
     probe = CrossNamespaceProbe(model_id="bge-m3")
     # Inject a "migration" entry directly: consecutive=1, last_seen_parsed_at=MIGRATION_PENDING
-    from prism_rag.store.cross_namespace_probe import CrossEdgeEntry, MIGRATION_PENDING
     eid = "code::a.py::Foo→nimbus::doc"
     probe._index[eid] = CrossEdgeEntry(
         edge_id=eid, source_node="code::a.py::Foo", target_node="nimbus::doc",
@@ -133,7 +129,6 @@ def test_classify_and_route_promotes_tier1(tmp_path):
     g.save(src.graph_path)
     fg = FederatedGraph.load([src])
     probe = CrossNamespaceProbe(model_id="bge-m3")
-    from prism_rag.store.cross_namespace_probe import CrossEdgeEntry
     eid = "code::a.py::Foo→nimbus::doc"
     probe._index[eid] = CrossEdgeEntry(
         edge_id=eid, source_node="code::a.py::Foo", target_node="nimbus::doc",
@@ -150,7 +145,6 @@ def test_classify_and_route_promotes_tier1(tmp_path):
     nimbus = fg.get_graph("nimbus")
     assert nimbus.g.has_edge("doc", "code::a.py::Foo")
     edge_data = nimbus.g.edges["doc", "code::a.py::Foo"]
-    from prism_rag.store.graph import LifecycleClass
     assert edge_data["lifecycle_class"] == LifecycleClass.ANCHORED
     # probe entry should now be ANCHORED
     assert probe._index[eid].lifecycle_class == LifecycleClass.ANCHORED
