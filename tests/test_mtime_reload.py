@@ -1,15 +1,14 @@
 """Tests for FederatedGraph 500ms mtime reload (Sprint 1 protocol)."""
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from prism_rag.config import GraphSource
 from prism_rag.store.federated import FederatedGraph
-from prism_rag.store.graph import Edge, KnowledgeGraph, Node
+from prism_rag.store.graph import KnowledgeGraph, Node
 
 
 def _build_simple_graph(path: Path) -> None:
@@ -55,7 +54,6 @@ def test_maybe_reload_picks_up_mtime_change(tmp_path):
     g2.add_node(Node(id="b", label="B"))
     g2.save(src.graph_path)
     # Bump mtime explicitly in case clock granularity collides
-    import os
     future = time.time() + 1.0
     os.utime(src.graph_path, (future, future))
 

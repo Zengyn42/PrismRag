@@ -68,6 +68,11 @@ class FederatedGraph:
         if src is None or not src.graph_path.exists():
             return
         self._graphs[ns] = KnowledgeGraph.load(src.graph_path)
+        # TODO(v5.2 Sprint 2): bridges are NOT invalidated here. If a reloaded
+        # namespace removed nodes that participated in build_bridges output
+        # (shared_tag, embedding_similar), unified_view may rebuild with
+        # phantom-node edges. Sprint 2 wiring of _maybe_reload into read paths
+        # should also call build_bridges() when reload occurred.
         # Invalidate the unified-view cache so it gets rebuilt with fresh nodes.
         self._unified = None
 
