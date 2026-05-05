@@ -65,25 +65,38 @@ def test_legacy_edge_load_defaults_probabilistic(tmp_path):
     assert edge_data.get("lifecycle_class", "probabilistic") == "probabilistic"
 
 
-def test_graph_save_is_atomic(tmp_path, monkeypatch):
-    """KnowledgeGraph.save must use atomic_write — no torn JSON visible."""
+def test_graph_save_is_atomic(tmp_path):
+    """KnowledgeGraph.save must use atomic_write — concurrent readers never see torn JSON.
+
+    Uses a ~110KB payload so that on Linux ext4/tmpfs a non-atomic write_text
+    would empirically interleave with reads. The torn-detect uses json.loads,
+    which catches any structural break (truncated, mid-write, mixed old+new).
+    """
+    import json as _json
     import threading
+
     g = KnowledgeGraph()
-    g.add_node(Node(id="n1", label="N1"))
+    for i in range(200):
+        g.add_node(Node(id=f"n{i}", label=f"N{i}",
+                        content="x" * 200, source_file=f"file{i}.md"))
     out = tmp_path / "graph.json"
     g.save(out)
 
     stop = threading.Event()
-    saw_partial = []
+    saw_partial: list[str] = []
 
-    def reader():
+    def reader() -> None:
         while not stop.is_set():
             try:
                 txt = out.read_text()
             except FileNotFoundError:
                 continue
-            if txt and not (txt.startswith("{") and txt.rstrip().endswith("}")):
-                saw_partial.append(txt[:80])
+            if not txt:
+                continue
+            try:
+                _json.loads(txt)
+            except _json.JSONDecodeError as exc:
+                saw_partial.append(f"{type(exc).__name__}: {str(exc)[:60]}")
 
     rt = threading.Thread(target=reader)
     rt.start()
@@ -94,4 +107,4 @@ def test_graph_save_is_atomic(tmp_path, monkeypatch):
         stop.set()
         rt.join()
 
-    assert saw_partial == [], f"saw partial JSON: {saw_partial[:3]}"
+    assert saw_partial == [], f"saw {len(saw_partial)} torn reads: {saw_partial[:3]}"

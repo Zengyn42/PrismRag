@@ -34,6 +34,8 @@ from typing import Any, Literal
 
 import networkx as nx
 
+from prism_rag.utils.io import atomic_write
+
 
 def _json_default(obj: Any) -> Any:
     """JSON encoder fallback for non-primitive types commonly found in Obsidian frontmatter.
@@ -210,8 +212,6 @@ class KnowledgeGraph:
         }
 
     def save(self, path: Path) -> None:
-        from prism_rag.utils.io import atomic_write
-
         atomic_write(
             path,
             json.dumps(self.to_json(), ensure_ascii=False, indent=2, default=_json_default),
