@@ -87,3 +87,70 @@ def test_classify_tier2_low_consec_top1():
 def test_classify_tier3_below_min_conf():
     e = _probe_entry(conf=0.60, consec=2)
     assert classify_one(e, is_top_1=True, profile=_PROFILE) == TIER_3
+
+
+from pathlib import Path
+
+from prism_rag.config import GraphSource, PrismRagSettings, get_classifier_profile
+from prism_rag.ingest.edge_classifier import classify_and_route, ClassifyReport
+from prism_rag.inbox.store import InboxStore
+from prism_rag.store.cross_namespace_probe import CrossNamespaceProbe
+from prism_rag.store.federated import FederatedGraph
+from prism_rag.store.graph import KnowledgeGraph, Node
+
+
+def test_classify_and_route_first_run_all_noop_due_to_migration_pending(tmp_path):
+    src = GraphSource(namespace="nimbus", vault_path=tmp_path, data_dir=tmp_path)
+    g = KnowledgeGraph()
+    g.add_node(Node(id="doc", label="doc"))
+    g.save(src.graph_path)
+    fg = FederatedGraph.load([src])
+
+    probe = CrossNamespaceProbe(model_id="bge-m3")
+    # Inject a "migration" entry directly: consecutive=1, last_seen_parsed_at=MIGRATION_PENDING
+    from prism_rag.store.cross_namespace_probe import CrossEdgeEntry, MIGRATION_PENDING
+    eid = "code::a.py::Foo→nimbus::doc"
+    probe._index[eid] = CrossEdgeEntry(
+        edge_id=eid, source_node="code::a.py::Foo", target_node="nimbus::doc",
+        edge_kind="embedding_similar", confidence_tier="INFERRED",
+        confidence=0.99, first_seen_at="x",
+        last_seen_parsed_at=MIGRATION_PENDING, source_file="a.py",
+        consecutive_seen=1, model_id="bge-m3",
+    )
+    inbox_path = tmp_path / "inbox.jsonl"
+    inbox = InboxStore(inbox_path)
+    settings = PrismRagSettings()
+    profile = get_classifier_profile(settings, "bge-m3")
+    report = classify_and_route(fg, probe, inbox, src, profile)
+    assert report.promoted == 0
+    assert report.queued == 0
+
+
+def test_classify_and_route_promotes_tier1(tmp_path):
+    src = GraphSource(namespace="nimbus", vault_path=tmp_path, data_dir=tmp_path)
+    g = KnowledgeGraph()
+    g.add_node(Node(id="doc", label="doc"))
+    g.save(src.graph_path)
+    fg = FederatedGraph.load([src])
+    probe = CrossNamespaceProbe(model_id="bge-m3")
+    from prism_rag.store.cross_namespace_probe import CrossEdgeEntry
+    eid = "code::a.py::Foo→nimbus::doc"
+    probe._index[eid] = CrossEdgeEntry(
+        edge_id=eid, source_node="code::a.py::Foo", target_node="nimbus::doc",
+        edge_kind="embedding_similar", confidence_tier="INFERRED",
+        confidence=0.80, first_seen_at="x",
+        last_seen_parsed_at="t1", source_file="a.py",
+        consecutive_seen=2, model_id="bge-m3",
+    )
+    inbox = InboxStore(tmp_path / "inbox.jsonl")
+    settings = PrismRagSettings()
+    profile = get_classifier_profile(settings, "bge-m3")
+    report = classify_and_route(fg, probe, inbox, src, profile)
+    assert report.promoted == 1
+    nimbus = fg.get_graph("nimbus")
+    assert nimbus.g.has_edge("doc", "code::a.py::Foo")
+    edge_data = nimbus.g.edges["doc", "code::a.py::Foo"]
+    from prism_rag.store.graph import LifecycleClass
+    assert edge_data["lifecycle_class"] == LifecycleClass.ANCHORED
+    # probe entry should now be ANCHORED
+    assert probe._index[eid].lifecycle_class == LifecycleClass.ANCHORED
