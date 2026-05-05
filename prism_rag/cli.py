@@ -603,6 +603,68 @@ def canvas(
     )
 
 
+@app.command(name="migrate-lifecycle")
+def migrate_lifecycle(
+    graph_path: Path = typer.Option(..., "--graph-path", help="Path to graph.json to migrate"),
+) -> None:
+    """One-shot migration: assign lifecycle_class to historical mentions_symbol edges.
+
+    Hard-fail mode — no fallback guessing. If any mentions_symbol edge has an
+    unknown source_pass (not in {ast, code, conv}), the entire migration rolls
+    back and the user must manually classify the offending edges.
+
+    Rules:
+      - relation == "mentions_symbol" + source_pass in ("ast", "code")  → DETERMINISTIC
+      - relation == "mentions_symbol" + source_pass == "conv"           → ANCHORED
+      - other mentions_symbol edges                                     → BLOCK (rollback)
+    Non-mentions_symbol edges are left alone (their default is PROBABILISTIC).
+    """
+    import json as _json
+    from prism_rag.store.graph import LifecycleClass
+    from prism_rag.utils.io import atomic_write
+
+    if not graph_path.exists():
+        typer.echo(f"graph file not found: {graph_path}", err=True)
+        raise typer.Exit(code=1)
+
+    payload = _json.loads(graph_path.read_text())
+    migrated = 0
+    skipped = 0
+    blocked: list[dict] = []
+    for edge in payload.get("edges", []):
+        if edge.get("relation") != "mentions_symbol":
+            continue
+        if edge.get("lifecycle_class"):
+            skipped += 1
+            continue
+        sp = edge.get("source_pass", "")
+        if sp in ("ast", "code"):
+            edge["lifecycle_class"] = LifecycleClass.DETERMINISTIC
+            migrated += 1
+        elif sp == "conv":
+            edge["lifecycle_class"] = LifecycleClass.ANCHORED
+            migrated += 1
+        else:
+            blocked.append({
+                "source": edge.get("source"),
+                "target": edge.get("target"),
+                "source_pass": sp,
+            })
+
+    if blocked:
+        typer.echo(
+            f"BLOCKED: {len(blocked)} mentions_symbol edges have unknown source_pass "
+            f"and cannot be auto-classified. Migration rolled back.",
+            err=True,
+        )
+        for b in blocked[:10]:
+            typer.echo(f"  - {b['source']} → {b['target']} (source_pass={b['source_pass']!r})", err=True)
+        raise typer.Exit(code=2)
+
+    atomic_write(graph_path, _json.dumps(payload, ensure_ascii=False, indent=2))
+    typer.echo(f"migrate-lifecycle complete: {migrated} migrated, {skipped} already aligned, 0 blocked")
+
+
 @app.command()
 def version() -> None:
     """Print PrismRag version."""
