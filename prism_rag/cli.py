@@ -689,7 +689,11 @@ def classify_edges_cmd() -> None:
     profile = get_classifier_profile(settings, model_id)
     report = classify_and_route(fg, probe, inbox, nimbus_src, profile)
     inbox.save_atomic()
-    fg.get_graph("nimbus").save(nimbus_src.graph_path)
+    nimbus_graph = fg.get_graph("nimbus")
+    if nimbus_graph is None:
+        typer.echo("error: 'nimbus' graph failed to load from disk", err=True)
+        raise typer.Exit(code=1)
+    nimbus_graph.save(nimbus_src.graph_path)
     typer.echo(f"classify-edges: promoted={report.promoted} queued={report.queued} "
                f"rolled_back={report.rolled_back} discarded={report.discarded}")
 

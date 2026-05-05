@@ -149,6 +149,8 @@ def _promote_to_tier1(
     # bare_src: strip the namespace prefix so the edge lives in the nimbus graph
     bare_src = sem_src.split("::", 1)[1] if "::" in sem_src else sem_src
     nimbus = fg.get_graph(nimbus_src.namespace)
+    if nimbus is None:
+        return  # graph not loaded, skip promotion
     edge = Edge(
         source=bare_src,
         target=sem_tgt,
