@@ -1014,6 +1014,124 @@ def check_drift(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+# -- Tool 10: list_pending_edges ---------------------------------------------
+
+
+@mcp.tool()
+def list_pending_edges(top_n: int = 10, sort_by: str = "confidence") -> str:
+    """List pending cross-namespace edges awaiting human review.
+
+    USAGE: Call when user asks "list pending edges" / "what needs review".
+    Do NOT auto-approve based on this output — only the user decides.
+
+    Args:
+        top_n: Maximum entries to return (default 10).
+        sort_by: "confidence" (default) | "created_at" | "consecutive_seen".
+    """
+    from prism_rag.inbox.store import InboxStore
+    settings = PrismRagSettings()
+    srcs = settings.resolved_graphs
+    nimbus_src = next((s for s in srcs if s.namespace == "nimbus"), srcs[0])
+    inbox = InboxStore(nimbus_src.data_dir / "inbox.jsonl")
+    return json.dumps(inbox.list_pending(top_n=top_n, sort_by=sort_by), ensure_ascii=False, indent=2)
+
+
+# -- Tool 11: get_pending_edge_context ---------------------------------------
+
+
+@mcp.tool()
+def get_pending_edge_context(edge_id: str) -> str:
+    """Get full context for a single pending edge.
+
+    USAGE: Call when user asks for details about a specific pending edge.
+    """
+    from prism_rag.inbox.store import InboxStore
+    settings = PrismRagSettings()
+    srcs = settings.resolved_graphs
+    nimbus_src = next((s for s in srcs if s.namespace == "nimbus"), srcs[0])
+    inbox = InboxStore(nimbus_src.data_dir / "inbox.jsonl")
+    entry = inbox.get(edge_id)
+    if entry is None:
+        return json.dumps({"status": "error", "msg": f"unknown edge_id: {edge_id}"})
+
+    fg = _ensure_federated()
+    sem_src = entry["source"]    # nimbus::doc
+    sem_tgt = entry["target"]    # code::file::Symbol
+    bare_src = sem_src.split("::", 1)[1] if "::" in sem_src else sem_src
+
+    nimbus = fg.get_graph("nimbus") if fg else None
+    code_g = fg.get_graph("code") if fg else None
+    vault_data = nimbus.g.nodes.get(bare_src, {}) if nimbus else {}
+    code_data = code_g.g.nodes.get(sem_tgt, {}) if code_g else {}
+
+    return json.dumps({
+        "status": "ok",
+        "edge_id": edge_id,
+        "confidence": entry["confidence"],
+        "model_id": entry["model_id"],
+        "vault_context": {
+            "id": bare_src,
+            "label": vault_data.get("label", bare_src),
+            "frontmatter": vault_data.get("frontmatter", {}),
+            "content_excerpt": (vault_data.get("content", "") or "")[:500],
+        },
+        "code_context": {
+            "id": sem_tgt,
+            "label": code_data.get("label", sem_tgt),
+            "kind": code_data.get("kind", "?"),
+            "metadata": code_data.get("metadata", {}),
+        },
+    }, ensure_ascii=False, indent=2)
+
+
+# -- Tool 12: review_pending_edge --------------------------------------------
+
+
+@mcp.tool()
+def review_pending_edge(edge_id: str, decision: str, note: str = "") -> str:
+    """Apply a human decision to a pending edge.
+
+    USAGE CONTRACT: HUMAN DECISION ONLY. Call ONLY when the user has explicitly
+    said "approve <id>" or "reject <id>". Do NOT auto-approve based on confidence.
+
+    Args:
+        edge_id: The id from list_pending_edges
+        decision: "approve" or "reject"
+        note: Optional human-supplied rationale
+    """
+    from prism_rag.inbox.store import InboxStore, StatusTransitionError
+    from prism_rag.inbox.approval import apply_decision
+
+    settings = PrismRagSettings()
+    srcs = settings.resolved_graphs
+    nimbus_src = next((s for s in srcs if s.namespace == "nimbus"), None)
+    if nimbus_src is None:
+        return json.dumps({"status": "error", "msg": "no nimbus namespace configured"})
+
+    inbox = InboxStore(nimbus_src.data_dir / "inbox.jsonl")
+    if inbox.get(edge_id) is None:
+        return json.dumps({"status": "error", "msg": f"unknown edge_id: {edge_id}"})
+    if decision not in ("approve", "reject"):
+        return json.dumps({"status": "error", "msg": f"decision must be approve or reject; got {decision!r}"})
+
+    fg = _ensure_federated()
+
+    try:
+        apply_decision(edge_id, decision, note,
+                       inbox=inbox, fg=fg, src=nimbus_src,
+                       decided_by="user_via_mcp")
+    except StatusTransitionError as exc:
+        return json.dumps({"status": "error", "msg": str(exc)})
+
+    inbox.save_atomic()
+    if decision == "approve":
+        nimbus = fg.get_graph("nimbus")
+        if nimbus is not None:
+            nimbus.save(nimbus_src.graph_path)
+
+    return json.dumps({"status": "ok", "edge_id": edge_id, "decision": decision, "note": note})
+
+
 # -- Register ported Obsidian MCP tools (vault_tools.py) ---------------------
 
 from prism_rag.mcp_server.vault_tools import register_vault_tools  # noqa: E402
