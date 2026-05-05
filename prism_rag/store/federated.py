@@ -9,9 +9,11 @@ not persisted — they depend on which graphs are loaded.
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from prism_rag.config import GraphSource
     from prism_rag.store.embedding_store import EmbeddingStore
 
 import networkx as nx
@@ -24,11 +26,51 @@ logger = logging.getLogger(__name__)
 class FederatedGraph:
     """Runtime federation over multiple KnowledgeGraph instances."""
 
+    _MTIME_CHECK_INTERVAL_S: float = 0.5
+
     def __init__(self, graphs: dict[str, KnowledgeGraph]) -> None:
         self._graphs: dict[str, KnowledgeGraph] = dict(graphs)
         self._single = len(self._graphs) == 1
         self._bridges: list[dict] = []
         self._unified: nx.DiGraph | None = None
+        # Cross-process IPC: 500ms mtime probe + lazy namespace reload.
+        # _sources is populated by load(); direct __init__ callers (e.g. tests
+        # constructing FederatedGraph manually) get an empty dict and thus a
+        # no-op _maybe_reload until they wire sources up themselves.
+        self._sources: dict[str, "GraphSource"] = {}
+        self._mtime_cache: dict[str, float] = {}
+        self._last_check_at: float = 0.0
+
+    def _maybe_reload(self) -> None:
+        """If 500ms has elapsed since last check, stat each graph.json
+        and lazy-reload any namespace whose mtime advanced."""
+        now = time.monotonic()
+        if now - self._last_check_at < self._MTIME_CHECK_INTERVAL_S:
+            return
+        self._last_check_at = now
+
+        for ns, src in self._sources.items():
+            try:
+                current_mtime = src.graph_path.stat().st_mtime
+            except (OSError, TypeError):
+                # OSError covers FileNotFoundError + other stat failures.
+                # TypeError can surface from test harnesses that patch
+                # pathlib.Path.stat without binding self correctly; in either
+                # case we skip this namespace this tick.
+                continue
+            cached = self._mtime_cache.get(ns, 0.0)
+            if current_mtime > cached:
+                self._reload_namespace(ns)
+                self._mtime_cache[ns] = current_mtime
+
+    def _reload_namespace(self, ns: str) -> None:
+        """Re-read a single namespace's graph.json into memory."""
+        src = self._sources.get(ns)
+        if src is None or not src.graph_path.exists():
+            return
+        self._graphs[ns] = KnowledgeGraph.load(src.graph_path)
+        # Invalidate the unified-view cache so it gets rebuilt with fresh nodes.
+        self._unified = None
 
     @property
     def namespaces(self) -> list[str]:
@@ -247,6 +289,8 @@ class FederatedGraph:
         """
         graphs: dict[str, KnowledgeGraph] = {}
         stores: dict[str, "EmbeddingStore"] = {}
+        sources_map: dict[str, "GraphSource"] = {}
+        mtime_cache: dict[str, float] = {}
         for src in sources:
             gpath = src.graph_path
             if not gpath.exists():
@@ -254,6 +298,11 @@ class FederatedGraph:
                 continue
             g = KnowledgeGraph.load(gpath)
             graphs[src.namespace] = g
+            sources_map[src.namespace] = src
+            try:
+                mtime_cache[src.namespace] = gpath.stat().st_mtime
+            except FileNotFoundError:
+                pass
             logger.info(f"[federated] loaded {src.namespace}: {g.node_count} nodes, {g.edge_count} edges")
 
             lance_path = src.data_dir / "lance"
@@ -269,6 +318,8 @@ class FederatedGraph:
                     logger.warning(f"[federated] failed to load embeddings for {src.namespace}: {e}")
 
         fg = cls(graphs)
+        fg._sources = sources_map
+        fg._mtime_cache = mtime_cache
 
         bridge_threshold = 0.70
         bridge_top_k = 5
