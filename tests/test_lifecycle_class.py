@@ -63,3 +63,35 @@ def test_legacy_edge_load_defaults_probabilistic(tmp_path):
     g = KnowledgeGraph.load(out)
     edge_data = g.g.edges["n1", "n2"]
     assert edge_data.get("lifecycle_class", "probabilistic") == "probabilistic"
+
+
+def test_graph_save_is_atomic(tmp_path, monkeypatch):
+    """KnowledgeGraph.save must use atomic_write — no torn JSON visible."""
+    import threading
+    g = KnowledgeGraph()
+    g.add_node(Node(id="n1", label="N1"))
+    out = tmp_path / "graph.json"
+    g.save(out)
+
+    stop = threading.Event()
+    saw_partial = []
+
+    def reader():
+        while not stop.is_set():
+            try:
+                txt = out.read_text()
+            except FileNotFoundError:
+                continue
+            if txt and not (txt.startswith("{") and txt.rstrip().endswith("}")):
+                saw_partial.append(txt[:80])
+
+    rt = threading.Thread(target=reader)
+    rt.start()
+    try:
+        for _ in range(30):
+            g.save(out)
+    finally:
+        stop.set()
+        rt.join()
+
+    assert saw_partial == [], f"saw partial JSON: {saw_partial[:3]}"

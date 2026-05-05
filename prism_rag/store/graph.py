@@ -15,7 +15,7 @@ JSON format (persisted to graph.json):
       ],
       "edges": [
         {"source", "target", "relation", "confidence", "confidence_score",
-         "weight", "source_pass"}
+         "weight", "source_pass", "lifecycle_class"}
       ],
       "communities": [
         {"id", "label", "god_nodes", "member_count", "internal_density"}
@@ -132,7 +132,7 @@ class Edge:
     confidence_score: float = 1.0
     weight: float = 1.0
     source_pass: SourcePass = "ast"
-    lifecycle_class: str = LifecycleClass.PROBABILISTIC
+    lifecycle_class: str = LifecycleClass.PROBABILISTIC  # str (not LifecycleClass) — values must be one of LifecycleClass; loose typing avoids forced coercion when loading legacy graphs
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -210,10 +210,11 @@ class KnowledgeGraph:
         }
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        from prism_rag.utils.io import atomic_write
+
+        atomic_write(
+            path,
             json.dumps(self.to_json(), ensure_ascii=False, indent=2, default=_json_default),
-            encoding="utf-8",
         )
 
     @classmethod
