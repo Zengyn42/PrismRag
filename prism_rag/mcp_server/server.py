@@ -62,29 +62,11 @@ _cross_ns_probe = None         # CrossNamespaceProbe | None
 mcp = FastMCP(
     "PrismRag",
     instructions=(
-        "PrismRag is a graph-first RAG system for knowledge bases. "
-        "Graph query tools: use search_knowledge for broad queries, explain_node for "
-        "specific concepts, trace_path to understand how two concepts connect, "
-        "list_communities / explore_community for structural overview, list_namespaces "
-        "to see what each namespace covers before querying. "
-        "Vault read/write tools: read_note / list_files / get_frontmatter for reading; "
-        "write_note / patch_note / update_frontmatter / move_note / delete_note / "
-        "manage_tags / search_files / get_links for mutations. "
-        "CAS workflow for all writes: always call read_note first to obtain cas_hash, "
-        "then pass it to the write tool — this prevents overwriting concurrent edits. "
-        "All write operations automatically trigger incremental graph re-ingest so "
-        "changes are immediately queryable via the graph tools. "
-        "IMPORTANT USAGE RULES: "
-        "(1) When a tool returns an error (node not found, no path), report the error "
-        "directly — do not silently substitute an alternative node or answer a different "
-        "question. "
-        "(2) When a query targets a specific node by name, use that exact name. If it is "
-        "not found, say so — do not pick a similar-sounding alternative and present it as "
-        "equivalent. "
-        "(3) After trace_path, check the 'namespace' field of each step to confirm the "
-        "path actually crosses the expected namespace boundaries (e.g. nimbus → code). "
-        "A path that stays inside nimbus (vault docs → tags) is NOT a vault-to-code "
-        "connection even if a tag label matches a code class name."
+        "PrismRag: graph-first RAG for Obsidian vaults + code repos. "
+        "Read prismrag://usage before querying for tool-selection guide and write protocol. "
+        "Read prismrag://namespaces to see what each namespace covers before querying. "
+        "CRITICAL: When a tool returns an error (node not found / no path), report it "
+        "directly — never substitute a different node or answer a different question."
     ),
 )
 
@@ -206,20 +188,17 @@ def search_knowledge(
 ) -> str:
     """Search the knowledge graph for information about a topic.
 
-    Uses hybrid BM25 + embedding + exact matching (RRF fusion) to find the
-    best entry node, then traverses the graph up to the token budget.
+    Uses hybrid BM25 + embedding + exact matching (RRF fusion) to find the best entry
+    node, then traverses the graph up to the token budget.
+    See prismrag://usage for scope/mode selection guide.
 
     Args:
-        query: Natural language query or node name (e.g., "session management", "Colony Coder")
+        query: Natural language query or exact node name
         budget: Maximum tokens to return (default 4000)
-        mode: Traversal mode — "bfs" (broad context) or "dfs" (follow chains)
-        scope: Namespace to search. Use "nimbus" for vault design docs / notes,
-               "code" for code implementation details, empty string to search both.
-               When the query is about design intent or architecture, prefer scope="nimbus".
-               When the query is about a specific code symbol or implementation, prefer scope="code".
-        ontology_type: Filter results to nodes with this ontology_type (e.g., "decision",
-                       "concept", "fact"). Empty string (default) = no filter.
-        min_confidence: Skip edges below this confidence score during traversal (default 0.0).
+        mode: "bfs" (broad context) or "dfs" (follow chains)
+        scope: "nimbus" for vault docs/notes, "code" for code symbols, "" for both
+        ontology_type: Filter to nodes with this type (e.g. "decision", "concept"). "" = no filter
+        min_confidence: Skip edges below this score (default 0.0)
 
     Returns:
         JSON with entry point, traversed nodes, and their content.
@@ -388,34 +367,20 @@ def trace_path(
 ) -> str:
     """Find the shortest path between two nodes in the knowledge graph.
 
-    Supports cross-namespace paths via bridge edges.
+    Supports cross-namespace paths via bridge edges. For cross-namespace paths
+    (e.g. vault doc → code class), use max_length=6+ since bridge edges add hops.
+    After receiving a path, verify the "namespace" field on each step — a path
+    that stays inside "nimbus" is NOT a vault-to-code connection.
 
     Args:
         from_node: Starting node (ID, label, partial name, or namespace::node_id)
         to_node: Ending node (ID, label, partial name, or namespace::node_id)
-        max_length: Maximum path length to search (default 5). For cross-namespace
-            paths (e.g. vault doc → code class), use max_length=6 or higher since
-            bridge edges add hops.
-        scope: Restrict the search to a single namespace (e.g. "nimbus" or
-            "code"). Empty string (default) searches the unified federated view
-            so cross-namespace paths are returnable.
-        min_confidence: Skip edges whose confidence_score is below this value
-            during shortest-path search (default 0.0 = no filter).
+        max_length: Maximum path length (default 5)
+        scope: Restrict to one namespace; empty = federated search (cross-namespace)
+        min_confidence: Skip edges below this score (default 0.0)
 
     Returns:
-        JSON with the shortest path as a sequence of nodes and edges. Each step
-        includes a "namespace" field showing which graph it belongs to.
-
-        Usage rules:
-        - If either endpoint returns "not found", report the error directly.
-          Do not substitute a different node and answer a different question.
-        - After receiving a path, check the "namespace" field of each step.
-          A cross-namespace path (nimbus → code) must contain steps in both
-          namespaces. A path that stays entirely within "nimbus" — even if it
-          passes through a tag node whose label matches a code class name — is
-          NOT a vault-to-code connection.
-        - If no path exists, report "No path found" as-is. Do not fabricate
-          an indirect connection or claim semantic proximity implies a graph path.
+        JSON path as a sequence of nodes+edges, each with a "namespace" field.
     """
     fg = _ensure_federated()
     scope_arg = scope or None
@@ -664,10 +629,8 @@ def explore_community(community: str, ontology_type: str = "") -> str:
 def list_namespaces() -> str:
     """List all loaded knowledge graph namespaces with statistics and source coverage.
 
-    Call this before querying a specific namespace to understand what codebase or
-    vault each namespace covers. A node that is not found in a namespace may simply
-    not be indexed there — not missing from the codebase entirely. For example, a
-    "code" namespace built from ZenithLoom will not contain PrismRag classes.
+    Prefer reading prismrag://namespaces (a resource) to get this data without a
+    tool round-trip. Use this tool when you need a fresh live count after re-ingest.
     """
     fg = _ensure_federated()
     settings = PrismRagSettings()
@@ -1130,6 +1093,170 @@ def review_pending_edge(edge_id: str, decision: str, note: str = "") -> str:
             nimbus.save(nimbus_src.graph_path)
 
     return json.dumps({"status": "ok", "edge_id": edge_id, "decision": decision, "note": note})
+
+
+# -- MCP Resources -----------------------------------------------------------
+#
+# Large reference material is exposed as resources (read on demand) rather than
+# baked into tool descriptions. This keeps the cold-start tool-list context
+# small (~400 tokens saved) while the data remains accessible when needed.
+
+
+@mcp.resource(
+    "prismrag://namespaces",
+    name="namespaces",
+    description="Overview of all loaded knowledge graph namespaces: node/edge counts, "
+                "community counts, indexed directories, and sample node IDs. "
+                "Read this first to understand what each namespace covers before querying.",
+    mime_type="application/json",
+)
+def resource_namespaces() -> str:
+    """Return namespace stats — same data as list_namespaces() but as a resource."""
+    return list_namespaces()
+
+
+@mcp.resource(
+    "prismrag://schema",
+    name="schema",
+    description="PrismRag graph schema: node kinds, edge relation types, "
+                "ontology_type vocabulary, and confidence tier definitions. "
+                "Read when constructing ontology_type or allowed_tiers filters.",
+    mime_type="application/json",
+)
+def resource_schema() -> str:
+    schema = {
+        "node_kinds": {
+            "note":      "Obsidian markdown note (vault)",
+            "knowledge": "Atomic knowledge chunk extracted from a note",
+            "function":  "Python function or method (code)",
+            "class":     "Python class definition (code)",
+            "module":    "Python module / file (code)",
+            "flow":      "Execution flow / entry point (code)",
+        },
+        "edge_relations": {
+            "mentions_symbol":    "vault doc → code symbol (cross-namespace)",
+            "semantically_similar_to": "embedding-based similarity edge",
+            "calls":              "function/method calls another",
+            "imports":            "module imports another",
+            "defines":            "module defines a class or function",
+            "inherits":           "class inherits from another",
+            "part_of":            "knowledge chunk belongs to a note",
+            "references":         "note references another note via wikilink",
+            "tagged_with":        "note has a frontmatter tag",
+            "BRIDGE":             "cross-namespace embedding bridge",
+        },
+        "ontology_types": [
+            "decision", "concept", "fact", "procedure", "reference",
+            "question", "observation", "hypothesis",
+        ],
+        "confidence_tiers": {
+            "EXTRACTED":  "directly parsed from source (highest confidence)",
+            "INFERRED":   "inferred by EdgeClassifier from context",
+            "AMBIGUOUS":  "low-confidence inference (excluded by default)",
+        },
+        "confidence_score_range": "0.0–1.0 (float); default filters: min_confidence=0.7",
+    }
+    import json
+    return json.dumps(schema, ensure_ascii=False, indent=2)
+
+
+@mcp.resource(
+    "prismrag://communities/{namespace}",
+    name="communities",
+    description="All Leiden communities in the given namespace with member counts, "
+                "god nodes, and internal density. Namespace examples: 'nimbus', 'code'. "
+                "Read instead of calling list_communities() for a one-shot overview.",
+    mime_type="application/json",
+)
+def resource_communities(namespace: str) -> str:
+    """Return community listing for one namespace."""
+    import json
+    fg = _ensure_federated()
+    graph = fg.get_graph(namespace)
+    if graph is None:
+        available = list(fg.namespaces)
+        return json.dumps(
+            {"error": f"Unknown namespace: {namespace!r}", "available": available},
+            ensure_ascii=False,
+        )
+    communities = []
+    for comm in sorted(graph.communities.values(), key=lambda c: -c.member_count):
+        communities.append({
+            "id": comm.id,
+            "label": comm.label,
+            "member_count": comm.member_count,
+            "internal_density": comm.internal_density,
+            "god_nodes": [graph.g.nodes[n].get("label", n) for n in comm.god_nodes],
+        })
+    return json.dumps({
+        "namespace": namespace,
+        "total_communities": len(communities),
+        "communities": communities,
+    }, ensure_ascii=False, indent=2)
+
+
+@mcp.resource(
+    "prismrag://usage",
+    name="usage",
+    description="Workflow guide for PrismRag: tool selection, CAS write protocol, "
+                "cross-namespace query patterns, and common error responses. "
+                "Read once per session before starting complex queries.",
+    mime_type="text/markdown",
+)
+def resource_usage() -> str:
+    return """\
+# PrismRag Usage Guide
+
+## Tool Selection
+
+| Goal | Tool |
+|------|------|
+| Find info about a topic | `search_knowledge` |
+| Get all edges for a specific node | `explain_node` |
+| Connect two concepts | `trace_path` |
+| Structural overview | read `prismrag://communities/{namespace}` |
+| What namespaces are loaded? | read `prismrag://namespaces` |
+| What changed recently? | `list_cross_namespace_edges(since=...)` |
+| Read a vault note | `read_note` |
+| Write/edit a vault note | `write_note` / `patch_note` |
+
+## Namespace Routing
+
+- `scope="nimbus"` — vault design docs, architecture notes, meeting notes
+- `scope="code"` — code symbols (functions, classes, modules)
+- `scope=""` — federated search across both (use for cross-namespace queries)
+
+When querying a specific code symbol (function/class name), always use `scope="code"`.
+When querying design intent or architecture, use `scope="nimbus"`.
+
+## CAS Write Protocol (mandatory for all vault writes)
+
+1. `read_note(path)` → get `cas_hash`
+2. Pass `cas_hash` to `write_note` / `patch_note` / `update_frontmatter`
+3. If CAS conflict error, re-read and retry
+
+NEVER write without a fresh `cas_hash` — this prevents overwriting concurrent edits.
+
+## Cross-Namespace Queries
+
+To trace from a vault doc to a code symbol:
+1. `trace_path(from_node="Doc Title", to_node="ClassName", scope="")` — leave scope empty
+2. Check `namespace` field on each step — path must contain both "nimbus" and "code" steps
+3. A path entirely within "nimbus" is NOT a vault→code connection (tags ≠ code symbols)
+
+## Error Handling
+
+- Node not found → report the error directly, do not substitute a similar node
+- No path found → report as-is, do not fabricate an indirect connection
+- Namespace not found → read `prismrag://namespaces` to see available namespaces
+
+## Search Tips
+
+- For exact symbol names (e.g. `ClaudeSDKNode`), exact match beats semantic search
+- Use `mode="dfs"` to follow call chains; `mode="bfs"` for broad topic context
+- Use `ontology_type="decision"` to filter for architectural decisions
+- `budget=8000` for detailed deep dives; `budget=2000` for quick lookups
+"""
 
 
 # -- Register ported Obsidian MCP tools (vault_tools.py) ---------------------
