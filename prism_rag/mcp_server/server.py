@@ -186,22 +186,16 @@ def search_knowledge(
     ontology_type: str = "",
     min_confidence: float = 0.0,
 ) -> str:
-    """Search the knowledge graph for information about a topic.
+    """Search the knowledge graph by topic, symbol name, or natural language query.
+    Returns entry node + graph traversal up to the token budget.
 
-    Uses hybrid BM25 + embedding + exact matching (RRF fusion) to find the best entry
-    node, then traverses the graph up to the token budget.
-    See prismrag://usage for scope/mode selection guide.
+    WHEN TO USE: Any question about what exists in the vault or codebase. Start here.
+    AFTER THIS: Use explain_node() for a specific node's full edge map; trace_path() to connect two concepts.
 
-    Args:
-        query: Natural language query or exact node name
-        budget: Maximum tokens to return (default 4000)
-        mode: "bfs" (broad context) or "dfs" (follow chains)
-        scope: "nimbus" for vault docs/notes, "code" for code symbols, "" for both
-        ontology_type: Filter to nodes with this type (e.g. "decision", "concept"). "" = no filter
-        min_confidence: Skip edges below this score (default 0.0)
-
-    Returns:
-        JSON with entry point, traversed nodes, and their content.
+    Hybrid ranking: BM25 keyword + embedding vector + exact name match, fused via RRF.
+    scope="nimbus" for vault design docs/notes; scope="code" for code symbols; scope="" searches both.
+    mode="bfs" for broad topic context; mode="dfs" to follow call/reference chains.
+    ontology_type filters to "decision", "concept", "fact", etc. (see prismrag://schema).
     """
     fg = _ensure_federated()
 
@@ -286,18 +280,14 @@ def search_knowledge(
 
 @mcp.tool()
 def explain_node(node: str, scope: str = "") -> str:
-    """Get detailed information about a specific node and its connections.
+    """360-degree view of a single graph node: all incoming/outgoing edges, community membership, full content.
 
-    Args:
-        node: Node ID, label, or partial name to look up.
-        scope: Namespace to search (e.g., "nimbus"). Empty = search all.
+    WHEN TO USE: After search_knowledge() to understand a specific node in depth. When you need all callers, all
+    references, or which community a symbol belongs to.
+    AFTER THIS: Use trace_path() to connect this node to another concept; impact() for blast radius before changes.
 
-    Returns:
-        JSON with node details, incoming edges, outgoing edges, and community info.
-        If the node is not found, returns {"error": "Node not found: ..."}.
-        Report this error directly — do not guess an alternative name and retry
-        silently. Old names from renames/refactors (e.g. AgentLoader → EntityLoader)
-        will not be found; report the absence rather than substituting.
+    If the node is not found, report the error directly — never substitute a similar-sounding name.
+    Old names from renames/refactors will not be found; report absence rather than guessing.
     """
     fg = _ensure_federated()
     entries = resolve_entry_points(fg, node, scope=scope or None)
@@ -365,22 +355,15 @@ def trace_path(
     scope: str = "",
     min_confidence: float = 0.0,
 ) -> str:
-    """Find the shortest path between two nodes in the knowledge graph.
+    """Find the shortest path between two graph nodes, including cross-namespace paths.
 
-    Supports cross-namespace paths via bridge edges. For cross-namespace paths
-    (e.g. vault doc → code class), use max_length=6+ since bridge edges add hops.
-    After receiving a path, verify the "namespace" field on each step — a path
-    that stays inside "nimbus" is NOT a vault-to-code connection.
+    WHEN TO USE: Connecting two concepts — e.g. "how does this vault doc relate to that code class?".
+    Use scope="" (default) for cross-namespace paths; scope="code" or "nimbus" for within-namespace only.
+    AFTER THIS: Check the "namespace" field on each step — a path staying entirely inside "nimbus" is NOT
+    a vault→code connection, even if a tag label matches a code class name.
 
-    Args:
-        from_node: Starting node (ID, label, partial name, or namespace::node_id)
-        to_node: Ending node (ID, label, partial name, or namespace::node_id)
-        max_length: Maximum path length (default 5)
-        scope: Restrict to one namespace; empty = federated search (cross-namespace)
-        min_confidence: Skip edges below this score (default 0.0)
-
-    Returns:
-        JSON path as a sequence of nodes+edges, each with a "namespace" field.
+    For cross-namespace paths (vault doc → code class), use max_length=6+ since bridge edges add hops.
+    If no path exists, report "No path found" directly — do not fabricate an indirect connection.
     """
     fg = _ensure_federated()
     scope_arg = scope or None
@@ -459,94 +442,72 @@ def trace_path(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-# -- Tool 4: list_communities ------------------------------------------------
+# -- Tool 4: communities (merged list_communities + explore_community) --------
 
 
 @mcp.tool()
-def list_communities(ontology_type: str = "") -> str:
-    """List all Leiden communities in the knowledge graph.
+def communities(namespace: str = "", community_id: str = "", ontology_type: str = "") -> str:
+    """List all Leiden communities in a namespace, or drill into a specific community.
 
-    Returns an overview with community labels, sizes, god nodes, and density.
-    Aggregates communities across all loaded namespaces.
+    WHEN TO USE: Structural overview of a namespace — what clusters exist, which nodes belong together.
+    Pass community_id to drill into a specific community's members and bridge edges.
+    AFTER THIS: Use search_knowledge(scope=namespace) to query within the community's topic area;
+    explain_node() on god nodes for the most connected symbols.
 
-    Args:
-        ontology_type: Filter — only include communities that contain at least one
-                       member with this ontology_type. Empty string (default) = no filter.
+    No community_id → returns all communities with label, size, god nodes, density.
+    With community_id → returns all members, internal edges, and bridge edges to other communities.
+    community_id accepts exact ID (e.g. "community_000"), namespace::ID, or label substring.
     """
     fg = _ensure_federated()
 
-    communities = []
-    total_nodes = 0
-    total_edges = 0
+    if not community_id:
+        # List mode — aggregate across namespaces (or filter to one)
+        result_communities = []
+        total_nodes = 0
+        total_edges = 0
+        target_ns_list = [namespace] if namespace else fg.namespaces
+        for ns in target_ns_list:
+            graph = fg.get_graph(ns)
+            if graph is None:
+                continue
+            total_nodes += graph.node_count
+            total_edges += graph.edge_count
+            for comm in sorted(graph.communities.values(), key=lambda c: -c.member_count):
+                if ontology_type:
+                    has_match = any(
+                        graph.g.nodes[nid].get("ontology_type") == ontology_type
+                        for nid in graph.g.nodes
+                        if graph.g.nodes[nid].get("community_id") == comm.id
+                    )
+                    if not has_match:
+                        continue
+                comm_id_str = comm.id if fg.is_single else f"{ns}::{comm.id}"
+                result_communities.append({
+                    "id": comm_id_str,
+                    "namespace": ns,
+                    "label": comm.label,
+                    "member_count": comm.member_count,
+                    "internal_density": comm.internal_density,
+                    "god_nodes": [graph.g.nodes[n].get("label", n) for n in comm.god_nodes],
+                })
+        return json.dumps({
+            "total_communities": len(result_communities),
+            "total_nodes": total_nodes,
+            "total_edges": total_edges,
+            "communities": result_communities,
+        }, ensure_ascii=False, indent=2)
 
-    for ns in fg.namespaces:
-        graph = fg.get_graph(ns)
-        total_nodes += graph.node_count
-        total_edges += graph.edge_count
-
-        for comm in sorted(graph.communities.values(), key=lambda c: -c.member_count):
-            # If ontology_type filter active, skip communities with no matching members
-            if ontology_type:
-                has_match = any(
-                    graph.g.nodes[nid].get("ontology_type") == ontology_type
-                    for nid in graph.g.nodes
-                    if graph.g.nodes[nid].get("community_id") == comm.id
-                )
-                if not has_match:
-                    continue
-
-            comm_id = comm.id if fg.is_single else f"{ns}::{comm.id}"
-            communities.append({
-                "id": comm_id,
-                "namespace": ns,
-                "label": comm.label,
-                "member_count": comm.member_count,
-                "internal_density": comm.internal_density,
-                "god_nodes": [
-                    graph.g.nodes[n].get("label", n) for n in comm.god_nodes
-                ],
-            })
-
-    result = {
-        "total_communities": len(communities),
-        "total_nodes": total_nodes,
-        "total_edges": total_edges,
-        "communities": communities,
-    }
-    return json.dumps(result, ensure_ascii=False, indent=2)
-
-
-# -- Tool 5: explore_community -----------------------------------------------
-
-
-@mcp.tool()
-def explore_community(community: str, ontology_type: str = "") -> str:
-    """Explore a specific community's members and connections.
-
-    Args:
-        community: Community ID (e.g., "community_000" or "namespace::community_000")
-                   or label substring.
-        ontology_type: Filter returned members to only those with this ontology_type
-                       (e.g., "decision", "concept"). Empty string (default) = no filter.
-
-    Returns:
-        JSON with all members, internal edges, and bridge edges to other communities.
-    """
-    fg = _ensure_federated()
-
-    # Parse optional namespace prefix
-    if "::" in community:
-        ns_hint, _, comm_query = community.partition("::")
+    # Drill-in mode — resolve specific community
+    if "::" in community_id:
+        ns_hint, _, comm_query = community_id.partition("::")
     else:
-        ns_hint = None
-        comm_query = community
+        ns_hint = namespace or None
+        comm_query = community_id
 
-    # Resolve community across namespaces
     target_comm = None
     target_graph = None
     target_ns = None
     comm_lower = comm_query.lower()
-
     search_ns = [ns_hint] if ns_hint else fg.namespaces
     for ns in search_ns:
         graph = fg.get_graph(ns)
@@ -562,33 +523,27 @@ def explore_community(community: str, ontology_type: str = "") -> str:
             break
 
     if target_comm is None:
-        # Collect all available communities for error message
         available = []
         for ns in fg.namespaces:
-            graph = fg.get_graph(ns)
-            for c in graph.communities.values():
+            g = fg.get_graph(ns)
+            for c in g.communities.values():
                 cid = c.id if fg.is_single else f"{ns}::{c.id}"
                 available.append({"id": cid, "label": c.label})
         return json.dumps({
-            "error": f"Community not found: {community!r}",
+            "error": f"Community not found: {community_id!r}",
             "available": available,
         }, ensure_ascii=False)
 
     graph = target_graph
-
-    # Members (optionally filtered by ontology_type)
     members = [
         _node_summary(graph, nid)
         for nid, data in graph.g.nodes(data=True)
         if data.get("community_id") == target_comm.id
         and (not ontology_type or data.get("ontology_type") == ontology_type)
     ]
-
-    # Internal edges (both endpoints in this community)
+    member_ids = {m["id"] for m in members}
     internal_edges = []
     bridge_edges = []
-    member_ids = {m["id"] for m in members}
-
     for u, v, data in graph.g.edges(data=True):
         u_in = u in member_ids
         v_in = v in member_ids
@@ -605,7 +560,7 @@ def explore_community(community: str, ontology_type: str = "") -> str:
             edge_info["cross_to"] = graph.g.nodes[v if u_in else u].get("community_id", "?")
             bridge_edges.append(edge_info)
 
-    result = {
+    return json.dumps({
         "community": {
             "id": target_comm.id if fg.is_single else f"{target_ns}::{target_comm.id}",
             "namespace": target_ns,
@@ -618,8 +573,7 @@ def explore_community(community: str, ontology_type: str = "") -> str:
         "internal_edges": len(internal_edges),
         "bridge_edges": len(bridge_edges),
         "top_bridge_edges": sorted(bridge_edges, key=lambda e: -e["score"])[:10],
-    }
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    }, ensure_ascii=False, indent=2)
 
 
 # -- Tool 6: list_namespaces -------------------------------------------------
@@ -627,10 +581,11 @@ def explore_community(community: str, ontology_type: str = "") -> str:
 
 @mcp.tool()
 def list_namespaces() -> str:
-    """List all loaded knowledge graph namespaces with statistics and source coverage.
+    """List loaded namespaces: node/edge/community counts, indexed directories, sample node IDs.
 
-    Prefer reading prismrag://namespaces (a resource) to get this data without a
-    tool round-trip. Use this tool when you need a fresh live count after re-ingest.
+    WHEN TO USE: First call when you need to confirm which namespace covers which codebase or vault,
+    or after re-ingest to verify updated counts. For a quick lookup without a tool call, read
+    prismrag://namespaces instead.
     """
     fg = _ensure_federated()
     settings = PrismRagSettings()
@@ -695,29 +650,17 @@ def impact(
     allowed_edge_kinds: str = "",
     path_score_fn: str = "weakest_link",
 ) -> str:
-    """Analyse the impact radius of changing a node.
+    """Analyze the blast radius of changing a node.
+    Returns affected symbols grouped by depth, with confidence tiers and cross-namespace vault mentions.
 
-    Answers: "If I change *target*, what else is affected?"
+    WHEN TO USE: Before modifying a shared code symbol or widely-cited design doc — especially refactoring,
+    renaming, or changing interfaces. Shows what would break.
+    AFTER THIS: Review direct dependents (d=1, WILL BREAK). Use explain_node() on high-risk items.
+    Check vault mentions for documentation that also needs updating.
 
-    Args:
-        target: Node ID or label to analyse (supports ``namespace::id`` syntax).
-        direction:
-            "upstream"   — who depends on / calls / references target?
-            "downstream" — what does target depend on / call / reference?
-            "both"       — union of both directions.
-        max_depth: Maximum traversal hops (default 3).
-        min_confidence: Skip edges below this confidence score (default 0.7).
-        scope: Restrict to this namespace (empty = search all).
-        allowed_tiers: Comma-separated confidence tiers to follow.
-            Default "EXTRACTED,INFERRED" excludes AMBIGUOUS edges.
-            Pass "EXTRACTED,INFERRED,AMBIGUOUS" to include all.
-        allowed_edge_kinds: Comma-separated edge kinds to follow (e.g.
-            "calls,imports"). Empty string means follow all kinds.
-        path_score_fn: Scoring mode — "weakest_link" (default) or
-            "cumulative_decay".
-
-    Returns:
-        Human-readable impact report grouped by depth with path scores.
+    direction: "upstream" (who depends on target) | "downstream" (what target depends on) | "both".
+    allowed_tiers: "EXTRACTED,INFERRED" (default, excludes AMBIGUOUS) | add "AMBIGUOUS" for all edges.
+    allowed_edge_kinds: comma-separated filter e.g. "calls,imports"; empty = all kinds.
     """
     fg = _ensure_federated()
     entries = resolve_entry_points(fg, target, scope=scope or None)
@@ -822,70 +765,7 @@ def impact(
     return report
 
 
-# -- Tool 8: list_cross_namespace_edges --------------------------------------
-
-
-@mcp.tool()
-def list_cross_namespace_edges(
-    since: str = "",
-    scope: str = "",
-    min_confidence: float = 0.0,
-    allowed_tiers: str = "",
-) -> str:
-    """List cross-namespace bridge edges tracked by the CrossNamespaceProbe.
-
-    Args:
-        since: ISO 8601 datetime string — return only edges first seen at or
-            after this timestamp (e.g. "2026-04-30T00:00:00+00:00").
-            Empty string means return all edges.
-        scope: Restrict to edges where source or target node starts with this
-            namespace prefix (e.g. "code" or "docs"). Empty means all.
-        min_confidence: Minimum confidence score [0.0–1.0] (default 0.0 = no filter).
-        allowed_tiers: Comma-separated confidence tiers to include
-            (e.g. "EXTRACTED,INFERRED"). Empty means all tiers.
-
-    Returns:
-        JSON object with ``total`` count and ``edges`` list, each entry
-        containing edge_id, source_node, target_node, edge_kind,
-        confidence_tier, confidence, and first_seen_at.
-    """
-    _ensure_federated()
-    if _cross_ns_probe is None:
-        return json.dumps({"total": 0, "edges": [], "note": "CrossNamespaceProbe not initialised"})
-
-    tiers: list[str] | None = (
-        [t.strip() for t in allowed_tiers.split(",") if t.strip()]
-        if allowed_tiers.strip()
-        else None
-    )
-
-    if since.strip():
-        try:
-            from datetime import datetime
-            since_dt = datetime.fromisoformat(since.strip())
-            edges = _cross_ns_probe.list_new_cross_edges(since_dt)
-        except ValueError:
-            return json.dumps({"error": f"Invalid ISO datetime: {since!r}"})
-    else:
-        edges = _cross_ns_probe.list_cross_edges(
-            min_confidence=min_confidence,
-            allowed_tiers=tiers,
-        )
-
-    if scope.strip():
-        scope_ns = scope.strip()
-        edges = [
-            e for e in edges
-            if e.source_node.startswith(scope_ns) or e.target_node.startswith(scope_ns)
-        ]
-
-    return json.dumps({
-        "total": len(edges),
-        "edges": [e.to_dict() for e in edges],
-    }, ensure_ascii=False, indent=2)
-
-
-# -- Tool 9: check_drift --------------------------------------------------------
+# -- Tool 8: check_drift --------------------------------------------------------
 
 
 @mcp.tool()
@@ -894,29 +774,14 @@ def check_drift(
     code_namespace: str = "code",
     include_valid: bool = False,
 ) -> str:
-    """Detect stale symbol references in vault documents (documentation drift).
+    """Detect stale vault→code symbol references (documentation drift).
+    Scans mentions_symbol edges and checks whether the referenced code symbol still exists.
 
-    Scans every mentions_symbol edge in the vault graph and checks whether the
-    referenced code symbol still exists in the code graph. Returns dangling
-    references where the target was renamed, moved, or deleted after the last
-    link-symbols run.
+    WHEN TO USE: After a refactor or rename — find vault docs with now-broken code references.
+    AFTER THIS: Update stale docs with patch_note() or write_note(). Re-run link-symbols to rebuild edges.
 
-    Note: this catches *post-link drift* only (symbol gone after link-symbols
-    ran). If vault text references a symbol that was already absent at link
-    time, no edge was ever created, so it won't appear here. Re-running
-    link-symbols after fixing the rename will surface new links.
-
-    Args:
-        vault_namespace: Namespace of the vault (doc) graph. Default "nimbus".
-        code_namespace: Namespace of the code graph. Default "code".
-        include_valid: If True, also include confirmed-valid references in the
-            output. Default False (stale-only is more actionable).
-
-    Returns:
-        JSON with stale_count, valid_count, stale_refs list (and optionally
-        valid_refs). Each stale entry includes the source doc label, the
-        referenced symbol name, confidence tier, score, and full target ID
-        so the caller can cross-check or re-run link-symbols after a fix.
+    Catches post-link drift only: symbols that existed when link-symbols ran but were later renamed/deleted.
+    Returns stale_count, stale_refs (doc label, symbol name, confidence, score) and optionally valid_refs.
     """
     fg = _ensure_federated()
     vault_g = fg.get_graph(vault_namespace)
@@ -977,56 +842,41 @@ def check_drift(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-# -- Tool 10: list_pending_edges ---------------------------------------------
+# -- Tool 9: pending_edges (merged list_pending_edges + get_pending_edge_context) --
 
 
 @mcp.tool()
-def list_pending_edges(top_n: int = 10, sort_by: str = "confidence") -> str:
-    """List pending cross-namespace edges awaiting human review.
+def pending_edges(edge_id: str = "", top_n: int = 10, sort_by: str = "confidence") -> str:
+    """List or inspect cross-namespace edges awaiting human review.
 
-    USAGE: Call when user asks "list pending edges" / "what needs review".
-    Do NOT auto-approve based on this output — only the user decides.
+    WHEN TO USE: When the user asks "list pending edges" or "what needs review".
+    Pass edge_id to get full context (vault excerpt + code metadata) for a specific entry before deciding.
+    AFTER THIS: Call review_pending_edge() with your decision — never auto-approve based on confidence alone.
 
-    Args:
-        top_n: Maximum entries to return (default 10).
-        sort_by: "confidence" (default) | "created_at" | "consecutive_seen".
+    No edge_id → returns the pending queue (top_n entries, sorted by confidence/created_at/consecutive_seen).
+    With edge_id → returns full vault snippet + code symbol metadata for that entry.
     """
     from prism_rag.inbox.store import InboxStore
     settings = PrismRagSettings()
     srcs = settings.resolved_graphs
     nimbus_src = next((s for s in srcs if s.namespace == "nimbus"), srcs[0])
     inbox = InboxStore(nimbus_src.data_dir / "inbox.jsonl")
-    return json.dumps(inbox.list_pending(top_n=top_n, sort_by=sort_by), ensure_ascii=False, indent=2)
 
+    if not edge_id:
+        return json.dumps(inbox.list_pending(top_n=top_n, sort_by=sort_by), ensure_ascii=False, indent=2)
 
-# -- Tool 11: get_pending_edge_context ---------------------------------------
-
-
-@mcp.tool()
-def get_pending_edge_context(edge_id: str) -> str:
-    """Get full context for a single pending edge.
-
-    USAGE: Call when user asks for details about a specific pending edge.
-    """
-    from prism_rag.inbox.store import InboxStore
-    settings = PrismRagSettings()
-    srcs = settings.resolved_graphs
-    nimbus_src = next((s for s in srcs if s.namespace == "nimbus"), srcs[0])
-    inbox = InboxStore(nimbus_src.data_dir / "inbox.jsonl")
     entry = inbox.get(edge_id)
     if entry is None:
         return json.dumps({"status": "error", "msg": f"unknown edge_id: {edge_id}"})
 
     fg = _ensure_federated()
-    sem_src = entry["source"]    # nimbus::doc
-    sem_tgt = entry["target"]    # code::file::Symbol
+    sem_src = entry["source"]
+    sem_tgt = entry["target"]
     bare_src = sem_src.split("::", 1)[1] if "::" in sem_src else sem_src
-
     nimbus = fg.get_graph("nimbus") if fg else None
     code_g = fg.get_graph("code") if fg else None
     vault_data = nimbus.g.nodes.get(bare_src, {}) if nimbus else {}
     code_data = code_g.g.nodes.get(sem_tgt, {}) if code_g else {}
-
     return json.dumps({
         "status": "ok",
         "edge_id": edge_id,
@@ -1047,20 +897,16 @@ def get_pending_edge_context(edge_id: str) -> str:
     }, ensure_ascii=False, indent=2)
 
 
-# -- Tool 12: review_pending_edge --------------------------------------------
+# -- Tool 10: review_pending_edge --------------------------------------------
 
 
 @mcp.tool()
 def review_pending_edge(edge_id: str, decision: str, note: str = "") -> str:
-    """Apply a human decision to a pending edge.
+    """Apply a human decision to a pending cross-namespace edge.
 
-    USAGE CONTRACT: HUMAN DECISION ONLY. Call ONLY when the user has explicitly
-    said "approve <id>" or "reject <id>". Do NOT auto-approve based on confidence.
-
-    Args:
-        edge_id: The id from list_pending_edges
-        decision: "approve" or "reject"
-        note: Optional human-supplied rationale
+    WHEN TO USE: ONLY when the user has explicitly said "approve <id>" or "reject <id>".
+    Never call based on confidence score alone — this requires explicit human instruction.
+    AFTER THIS: If approved, the edge is committed to the vault graph immediately.
     """
     from prism_rag.inbox.store import InboxStore, StatusTransitionError
     from prism_rag.inbox.approval import apply_decision

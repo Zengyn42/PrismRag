@@ -1067,16 +1067,11 @@ def register_vault_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def read_note(path: str, namespace: str = "") -> str:
-        """Read a note's content, frontmatter, and CAS hash.
+        """Read a vault note: returns full content, parsed frontmatter dict, and cas_hash.
 
-        Args:
-            path: Relative path within the vault (e.g. "projects/my-note.md")
-            namespace: Target namespace. Required when multiple namespaces are
-                       loaded; optional when only one exists.
-
-        Returns:
-            JSON with content, frontmatter dict, cas_hash, mtime_ms, path,
-            and namespace.
+        WHEN TO USE: Reading any vault note. Always call this first before any write operation
+        to get the cas_hash — required to prevent overwriting concurrent edits.
+        AFTER THIS: Pass cas_hash to write_note / patch_note / update_frontmatter / move_note / delete_note.
         """
         return await _read_note_impl(path, namespace)
 
@@ -1087,33 +1082,12 @@ def register_vault_tools(mcp: FastMCP) -> None:
         recursive: bool = False,
         namespace: str = "",
     ) -> str:
-        """List note files in a vault directory.
+        """List .md files under a vault directory (path, size_bytes, mtime_ms).
 
-        Args:
-            directory: Relative directory path (empty = vault root)
-            pattern: Glob pattern (default "*.md")
-            recursive: If True, traverse sub-directories
-            namespace: Target namespace. Required when multiple namespaces are
-                       loaded; optional when only one exists.
-
-        Returns:
-            JSON with files list (path, size_bytes, mtime_ms) and count.
+        WHEN TO USE: Browsing vault structure, finding notes in a directory.
+        Use search_files() for content/keyword search; search_knowledge() for semantic search.
         """
         return await _list_files_impl(directory, pattern, recursive, namespace)
-
-    @mcp.tool()
-    async def get_frontmatter(path: str, namespace: str = "") -> str:
-        """Get only the YAML frontmatter of a vault note.
-
-        Args:
-            path: Relative path within the vault
-            namespace: Target namespace. Required when multiple namespaces are
-                       loaded; optional when only one exists.
-
-        Returns:
-            JSON with frontmatter dict, path, and namespace.
-        """
-        return await _get_frontmatter_impl(path, namespace)
 
     @mcp.tool()
     async def write_note(
@@ -1122,22 +1096,12 @@ def register_vault_tools(mcp: FastMCP) -> None:
         cas_hash: str = "",
         namespace: str = "",
     ) -> str:
-        """Write a note to the vault (create or overwrite).
+        """Write a vault note (create or overwrite). Knowledge graph is synced automatically after write.
 
-        After writing, the knowledge graph is automatically updated
-        (best-effort; a graph failure does not abort the write).
-
-        Args:
-            path: Relative path within the vault (e.g. "projects/my-note.md")
-            content: Full markdown content (including frontmatter if desired)
-            cas_hash: Empty string = create new file (fails if already exists).
-                      Non-empty = overwrite (fails if hash does not match).
-                      Obtain cas_hash from read_note first.
-            namespace: Target namespace. Required when multiple namespaces are
-                       loaded; optional when only one exists.
-
-        Returns:
-            JSON with new cas_hash and graph_update stats.
+        WHEN TO USE: Creating a new note, or replacing an entire note's content.
+        REQUIRES: cas_hash from read_note() to overwrite an existing file. Pass cas_hash="" only for new files
+        (fails if the file already exists — prevents accidental overwrite).
+        AFTER THIS: Graph is updated automatically — changes are immediately queryable via search_knowledge().
         """
         return await _write_note_impl(path, content, cas_hash, namespace)
 
@@ -1149,24 +1113,12 @@ def register_vault_tools(mcp: FastMCP) -> None:
         cas_hash: str = "",
         namespace: str = "",
     ) -> str:
-        """Patch one section of a note identified by its heading.
+        """Replace one heading-delimited section in a note; all other sections and frontmatter are preserved.
 
-        Only the targeted section's content is replaced; all other sections
-        and the frontmatter are preserved unchanged. After a successful patch
-        the knowledge graph is automatically updated (best-effort).
-
-        Args:
-            path: Relative path within the vault
-            section_heading: Exact heading text (e.g. "## 决策") or title only
-                             (e.g. "决策")
-            new_content: Replacement body text for the section (without the
-                         heading line itself)
-            cas_hash: CAS hash from read_note. Required to avoid overwriting
-                      concurrent edits.
-            namespace: Target namespace.
-
-        Returns:
-            JSON with new cas_hash, sections_affected, and graph_update stats.
+        WHEN TO USE: Editing one section of an existing note without touching other content.
+        Use write_note() to replace the entire file; use update_frontmatter() for YAML-only changes.
+        REQUIRES: cas_hash from read_note(). section_heading must exactly match a heading in the note
+        (e.g. "## 决策" or just "决策").
         """
         return await _patch_note_impl(path, section_heading, new_content, cas_hash, namespace)
 
@@ -1177,20 +1129,11 @@ def register_vault_tools(mcp: FastMCP) -> None:
         cas_hash: str = "",
         namespace: str = "",
     ) -> str:
-        """Merge updates into the note's frontmatter (other fields untouched).
+        """Merge key-value changes into a note's YAML frontmatter without touching the note body.
 
-        Existing frontmatter keys not listed in ``updates`` are preserved
-        byte-for-byte. After a successful update the knowledge graph is
-        automatically updated (best-effort).
-
-        Args:
-            path: Relative path within the vault
-            updates: Dict of frontmatter fields to add or overwrite
-            cas_hash: CAS hash from read_note (optional but recommended).
-            namespace: Target namespace.
-
-        Returns:
-            JSON with new cas_hash and graph_update stats.
+        WHEN TO USE: Adding or changing frontmatter fields (status, date, custom fields) without
+        altering note content. For tag-only changes, use manage_tags() instead.
+        REQUIRES: cas_hash from read_note(). Unlisted frontmatter keys are preserved unchanged.
         """
         return await _update_frontmatter_impl(path, updates, cas_hash, namespace)
 
@@ -1201,22 +1144,11 @@ def register_vault_tools(mcp: FastMCP) -> None:
         cas_hash: str = "",
         namespace: str = "",
     ) -> str:
-        """Move or rename a note within the vault.
+        """Move or rename a vault note. Updates the knowledge graph node to match the new path.
 
-        Atomically renames the file.  After a successful move the knowledge
-        graph is updated: if the node ID changes (no knowledge_id frontmatter)
-        the stale node is removed before re-ingesting the new path; if the node
-        ID is stable (knowledge_id-based) only ``source_file`` is updated.
-
-        Args:
-            source: Current relative path within the vault.
-            dest: Target relative path within the vault (must not already exist).
-            cas_hash: CAS hash of the source file (from read_note). Optional but
-                      recommended to guard against concurrent edits.
-            namespace: Target namespace.
-
-        Returns:
-            JSON with source, dest, new_cas_hash, id_changed, and graph_update.
+        WHEN TO USE: Reorganizing vault structure — renaming files or moving between directories.
+        REQUIRES: cas_hash from read_note(). Destination path must not already exist.
+        Graph sync: if node ID is path-based it is remapped; if knowledge_id-based only source_file updates.
         """
         return await _move_note_impl(source, dest, cas_hash, namespace)
 
@@ -1226,20 +1158,10 @@ def register_vault_tools(mcp: FastMCP) -> None:
         cas_hash: str = "",
         namespace: str = "",
     ) -> str:
-        """Soft-delete a note by moving it to <vault>/.trash/.
+        """Soft-delete a vault note (moves to <vault>/.trash/). Removes the node from the knowledge graph.
 
-        The node is also removed from the knowledge graph.  The trashed file
-        keeps its original relative path under .trash/ so it can be recovered
-        manually.  If the same file already exists in .trash/, a UTC timestamp
-        suffix is appended to avoid collision.
-
-        Args:
-            path: Relative path within the vault.
-            cas_hash: CAS hash for conflict detection (optional but recommended).
-            namespace: Target namespace.
-
-        Returns:
-            JSON with path, trash_path, and namespace.
+        WHEN TO USE: Removing a note you no longer need. Reversible — the file is preserved under .trash/.
+        REQUIRES: cas_hash from read_note() recommended to guard against concurrent edits.
         """
         return await _delete_note_impl(path, cas_hash, namespace)
 
@@ -1251,29 +1173,11 @@ def register_vault_tools(mcp: FastMCP) -> None:
         cas_hash: str = "",
         namespace: str = "",
     ) -> str:
-        """Add or remove tags in a note's frontmatter ``tags`` field.
+        """Add or remove tags in a note's frontmatter tags field.
 
-        Only the YAML frontmatter ``tags`` list is modified.  Inline ``#tags``
-        in the note body are intentionally left untouched — they are considered
-        part of the document prose and must be edited manually. After a
-        successful change the knowledge graph is automatically updated
-        (best-effort).
-
-        Tags in the ``add`` list that already exist are silently ignored
-        (deduplication).  Tags in the ``remove`` list that are absent are
-        silently ignored.  Leading ``#`` characters are stripped from all
-        supplied tags before comparison.
-
-        Args:
-            path: Relative path within the vault.
-            add: Tags to add (may include leading ``#``).
-            remove: Tags to remove (may include leading ``#``).
-            cas_hash: CAS hash for conflict detection (from read_note).
-            namespace: Target namespace.
-
-        Returns:
-            JSON with path, tags_before, tags_after, new cas_hash, and
-            graph_update stats.
+        WHEN TO USE: Tag-only frontmatter updates. For broader frontmatter changes use update_frontmatter().
+        REQUIRES: cas_hash from read_note(). Duplicate adds and absent removes are silently ignored.
+        Note: inline #tags in the body are not touched — frontmatter only.
         """
         return await _manage_tags_impl(path, add, remove, cas_hash, namespace)
 
@@ -1286,26 +1190,11 @@ def register_vault_tools(mcp: FastMCP) -> None:
         max_results: int = 50,
         namespace: str = "",
     ) -> str:
-        """Search vault notes by keyword (filename and/or content).
+        """Search vault notes by exact keyword across filenames and/or content.
 
-        Scans every ``.md`` file under the given directory (default: vault
-        root), checking the filename and — unless ``filename_only`` is True —
-        the full file content for the supplied keyword.
-
-        Args:
-            query: Search keyword (non-empty).
-            directory: Relative directory to scope the search (empty = vault
-                       root).
-            case_sensitive: When False (default), search is case-insensitive.
-            filename_only: When True, only filenames are checked; file content
-                           is not read.
-            max_results: Maximum number of matching files to return (default 50).
-                         When capped, ``truncated`` is True in the response.
-            namespace: Target namespace.
-
-        Returns:
-            JSON with matches list (path, filename_match, line_hits), count,
-            and truncated flag.
+        WHEN TO USE: Finding notes that contain a specific word or phrase. For semantic/conceptual search
+        use search_knowledge() instead. Use filename_only=True for fast path-only lookup.
+        Returns matches with path, filename_match flag, and matching line excerpts.
         """
         return await _search_files_impl(
             query, directory, case_sensitive, filename_only, max_results, namespace
@@ -1313,22 +1202,10 @@ def register_vault_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def get_links(path: str, namespace: str = "") -> str:
-        """Return the outgoing and incoming wikilinks for a vault note.
+        """Return outgoing [[wikilinks]] from a note and incoming links pointing to it.
 
-        Outgoing links are [[wikilinks]] found in the note's raw text.
-        Incoming links are discovered by scanning the whole vault for files
-        that reference this note's stem (``[[note_stem]]``).
-
-        Note: the incoming-link scan walks every ``.md`` file in the vault on
-        each call (O(N)).  Acceptable for small vaults; for large vaults
-        consider using the graph's precomputed backlinks instead.
-
-        Args:
-            path: Relative path to the note within the vault.
-            namespace: Target namespace.
-
-        Returns:
-            JSON with path, outgoing (list of wikilink targets), incoming
-            (list of relative paths that reference this note), and namespace.
+        WHEN TO USE: Understanding a note's position in the vault link graph — what it links to
+        and what links back. For graph-traversal-based connections use search_knowledge() or trace_path().
+        Note: incoming scan walks all .md files on each call (O(N) — fine for small vaults).
         """
         return await _get_links_impl(path, namespace)
