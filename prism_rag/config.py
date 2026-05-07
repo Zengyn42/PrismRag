@@ -84,7 +84,9 @@ class GraphSource(BaseModel):
 class PrismRagSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="PRISM_",
-        env_file=".env",
+        # Resolve .env relative to the package root so the server loads
+        # correctly regardless of the working directory it is started from.
+        env_file=str(Path(__file__).resolve().parent.parent / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
