@@ -29,6 +29,8 @@ Usage:
 
 from __future__ import annotations
 
+import fcntl
+import json
 import logging
 import time
 from pathlib import Path
@@ -146,6 +148,8 @@ def _get_embeddable_nodes(graph: KnowledgeGraph) -> list[tuple[str, str]]:
 def compute_embeddings(
     graph: KnowledgeGraph,
     settings: PrismRagSettings,
+    *,
+    cache_path: Path | None = None,
 ) -> dict[str, list[float]]:
     """Compute embeddings for all embeddable nodes using the configured backend.
 
@@ -153,11 +157,16 @@ def compute_embeddings(
     Ollama uses settings.ollama_host / settings.ollama_model (local, no key needed).
     Gemini uses settings.gemini_api_key / settings.embed_dimensionality.
 
+    Args:
+        cache_path: Optional path to embed_cache.jsonl for checkpoint/resume support.
+                    If provided, already-computed nodes (matched by content_hash) are
+                    skipped. New results are appended to the cache file.
+
     Returns:
         dict mapping node_id → embedding vector (list of floats).
     """
     if settings.embed_backend == "ollama":
-        return _compute_embeddings_ollama(graph, settings)
+        return _compute_embeddings_ollama(graph, settings, cache_path=cache_path)
     else:
         if not settings.gemini_api_key:
             raise ValueError(
@@ -174,12 +183,48 @@ def compute_embeddings(
 
 
 _OLLAMA_BATCH_SIZE = 16   # texts per HTTP request; tune to GPU VRAM
-_OLLAMA_TIMEOUT = 300    # seconds per batch request
+_OLLAMA_TIMEOUT = 60    # seconds per batch request
+
+
+def _load_embed_cache(cache_path: Path) -> dict[str, tuple[str, list[float]]]:
+    """Load embed_cache.jsonl → {node_id: (sha, vec)}. Last-wins on duplicate node_id."""
+    if not cache_path.exists():
+        return {}
+    result: dict[str, tuple[str, list[float]]] = {}
+    for line in cache_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            result[entry["node_id"]] = (entry["sha"], entry["vec"])
+        except Exception:
+            continue
+    return result
+
+
+def _append_cache_entry(
+    cache_path: Path, node_id: str, sha: str, vec: list[float]
+) -> None:
+    """Append one cache entry to embed_cache.jsonl with exclusive file lock.
+
+    4096-dimensional float32 vectors are ~65KB per line, well above PIPE_BUF
+    (4096 bytes), so we cannot rely on atomic write semantics.
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps({"node_id": node_id, "sha": sha, "vec": vec}, ensure_ascii=False)
+    with cache_path.open("a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.write(line + "\n")
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def _compute_embeddings_ollama(
     graph: KnowledgeGraph,
     settings: PrismRagSettings | None = None,
+    cache_path: Path | None = None,
 ) -> dict[str, list[float]]:
     """Compute embeddings using local Ollama (batched)."""
     nodes_to_embed = _get_embeddable_nodes(graph)
@@ -187,24 +232,44 @@ def _compute_embeddings_ollama(
         logger.info("[embedder/ollama] no embeddable nodes found")
         return {}
 
+    cache: dict[str, tuple[str, list[float]]] = {}
+    if cache_path is not None:
+        cache = _load_embed_cache(cache_path)
+
+    vectors: dict[str, list[float]] = {}
+    pending: list[tuple[str, str]] = []
+    for node_id, content in nodes_to_embed:
+        node_data = graph.g.nodes[node_id]
+        sha = node_data.get("content_hash", "")
+        if node_id in cache and cache[node_id][0] == sha:
+            vectors[node_id] = cache[node_id][1]
+        else:
+            pending.append((node_id, content))
+
+    if not pending:
+        logger.info("[embedder/ollama] all nodes hit cache, skipping embed call")
+        return vectors
+
     model = settings.ollama_model if settings else _OLLAMA_DEFAULT_MODEL
     host = settings.ollama_host if settings else _OLLAMA_DEFAULT_HOST
     embedder = OllamaEmbedder(model=model, base_url=host, timeout=_OLLAMA_TIMEOUT)
-    total = len(nodes_to_embed)
+    total = len(pending)
     logger.info(
         f"[embedder/ollama] computing {total} embeddings "
-        f"(model={embedder.model}, batch={_OLLAMA_BATCH_SIZE})"
+        f"(model={embedder.model}, batch={_OLLAMA_BATCH_SIZE}, cache_hits={len(vectors)})"
     )
-    vectors: dict[str, list[float]] = {}
 
     for batch_start in range(0, total, _OLLAMA_BATCH_SIZE):
-        batch = nodes_to_embed[batch_start: batch_start + _OLLAMA_BATCH_SIZE]
+        batch = pending[batch_start: batch_start + _OLLAMA_BATCH_SIZE]
         node_ids = [nid for nid, _ in batch]
         texts = [_truncate(content) for _, content in batch]
         try:
             vecs = embedder.embed_batch(texts)
             for nid, vec in zip(node_ids, vecs):
                 vectors[nid] = vec
+                if cache_path is not None:
+                    sha = graph.g.nodes[nid].get("content_hash", "")
+                    _append_cache_entry(cache_path, nid, sha, vec)
         except Exception as exc:
             logger.error(
                 f"[embedder/ollama] batch {batch_start}–{batch_start + len(batch) - 1} failed: {exc}"
@@ -213,7 +278,11 @@ def _compute_embeddings_ollama(
             # Fall back to single-item calls so one bad node doesn't lose the batch
             for nid, text in zip(node_ids, texts):
                 try:
-                    vectors[nid] = embedder.embed_query(text)
+                    vec = embedder.embed_query(text)
+                    vectors[nid] = vec
+                    if cache_path is not None:
+                        sha = graph.g.nodes[nid].get("content_hash", "")
+                        _append_cache_entry(cache_path, nid, sha, vec)
                 except Exception as exc2:
                     logger.error(f"[embedder/ollama] node {nid} failed: {exc2}")
 
@@ -221,7 +290,7 @@ def _compute_embeddings_ollama(
         if done % 160 == 0 or done == total:
             logger.info(f"[embedder/ollama] progress: {done}/{total}")
 
-    logger.info(f"[embedder/ollama] done: {len(vectors)}/{total}")
+    logger.info(f"[embedder/ollama] done: {len(vectors)}/{total + len(cache)}")
     return vectors
 
 

@@ -136,7 +136,8 @@ def ingest(
             f"\n🧬 Pass 3a: Computing embeddings ({_backend_label}, dim={settings.embedding_dim})...",
             fg=typer.colors.BLUE,
         )
-        vectors = compute_embeddings(graph, settings)
+        cache_path = settings.data_dir / "embed_cache.jsonl"
+        vectors = compute_embeddings(graph, settings, cache_path=cache_path)
         typer.echo(f"   Embedded {len(vectors)} nodes")
 
         typer.secho("\n🔗 Pass 3b: Generating similarity edges...", fg=typer.colors.BLUE)
@@ -465,7 +466,7 @@ def ingest_code(
             fg=typer.colors.BLUE,
         )
         try:
-            vectors = compute_embeddings(graph, settings)
+            vectors = compute_embeddings(graph, settings, cache_path=out_dir / "embed_cache.jsonl")
             lance_path = out_dir / "lance"
             n_persisted = persist_embeddings(vectors, lance_path, dim=settings.embedding_dim)
             typer.echo(f"   Embeddings: {n_persisted} → {lance_path}")
