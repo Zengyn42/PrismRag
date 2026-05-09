@@ -1004,6 +1004,36 @@ def atomize_propose(scan_id: str, claims: list[dict]) -> str:
         return json.dumps({"error": str(e), "error_type": "ScanExpiredError"}, ensure_ascii=False)
 
 
+# -- Tool: atomize_apply -------------------------------------------------------
+
+@mcp.tool()
+def atomize_apply(proposal_id: str) -> str:
+    """Apply an atomization proposal: create knowledge/*.md files and patch source document.
+    Returns JSON with applied_count and list of created knowledge file paths.
+    Raises error if source document has changed since atomize_propose was called (StaleDocError).
+    Idempotent: already-applied KNOW-IDs are skipped safely (crash recovery).
+    See atomize_propose() for the previous step.
+    """
+    from prism_rag.ingest.atomize import atomize_apply_impl, StaleDocError
+    settings = PrismRagSettings()
+    pending_dir = settings.data_dir / "atomize-proposals" / "pending"
+    applied_dir = settings.data_dir / "atomize-proposals" / "applied"
+    resolved = settings.resolved_graphs
+    vault_root = resolved[0].vault_path if resolved else settings.vault_path
+    try:
+        result = atomize_apply_impl(
+            proposal_id=proposal_id,
+            vault_root=vault_root,
+            pending_dir=pending_dir,
+            applied_dir=applied_dir,
+        )
+        return json.dumps(result, ensure_ascii=False)
+    except StaleDocError as e:
+        return json.dumps({"error": str(e), "error_type": "StaleDocError"}, ensure_ascii=False)
+    except FileNotFoundError as e:
+        return json.dumps({"error": str(e), "error_type": "NotFound"}, ensure_ascii=False)
+
+
 # -- MCP Resources -----------------------------------------------------------
 #
 # Large reference material is exposed as resources (read on demand) rather than

@@ -23,6 +23,10 @@ class ScanExpiredError(Exception):
     """Raised when a scan_id is not found or is older than the TTL."""
 
 
+class StaleDocError(Exception):
+    """Raised when source document content has changed since the proposal was created."""
+
+
 _SCAN_TTL_HOURS = 24
 _HEADING_RE = re.compile(r"^(#{1,2})\s+(.*)", re.MULTILINE)
 
@@ -226,4 +230,165 @@ def atomize_propose_impl(
             {"knowledge_id": c["knowledge_id"], "title": c["title"], "claim_status": c["claim_status"]}
             for c in validated_claims
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: atomize_apply
+# ---------------------------------------------------------------------------
+
+
+def _write_knowledge_file(
+    path: Path,
+    knowledge_id: str,
+    title: str,
+    ontology_type: str,
+    atomized_from: str,
+    body: str,
+) -> None:
+    """Write a knowledge markdown file atomically (tmp + os.rename)."""
+    import os
+    import tempfile
+
+    frontmatter_lines = [
+        "---",
+        f"knowledge_id: {knowledge_id}",
+        f"title: {title}",
+        f"ontology_type: {ontology_type}",
+        f"atomized_from: {atomized_from}",
+        "status: active",
+        "---",
+        body,
+    ]
+    content = "\n".join(frontmatter_lines) + "\n"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic write: tmp file in same directory, then rename
+    fd, tmp_path_str = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.rename(tmp_path_str, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path_str)
+        except OSError:
+            pass
+        raise
+
+
+def _patch_source_doc_atomized_nodes(doc_path: Path, knowledge_ids: list[str]) -> None:
+    """Add/update atomized_nodes list in source document frontmatter using PyYAML."""
+    from prism_rag.vault_ops.markdown_ops import parse_frontmatter, serialize_frontmatter
+
+    content = doc_path.read_text(encoding="utf-8")
+    fm, body = parse_frontmatter(content)
+    fm["atomized_nodes"] = knowledge_ids
+    new_content = serialize_frontmatter(fm, body)
+    doc_path.write_text(new_content, encoding="utf-8")
+
+
+def _read_existing_atomized_nodes(doc_path: Path) -> set[str]:
+    """Return the set of KNOW-IDs already in the source doc's atomized_nodes frontmatter."""
+    from prism_rag.vault_ops.markdown_ops import parse_frontmatter
+
+    content = doc_path.read_text(encoding="utf-8")
+    fm, _ = parse_frontmatter(content)
+    existing = fm.get("atomized_nodes", [])
+    if not isinstance(existing, list):
+        return set()
+    return {str(kid) for kid in existing if kid}
+
+
+def atomize_apply_impl(
+    proposal_id: str,
+    vault_root: Path,
+    pending_dir: Path,
+    applied_dir: Path,
+) -> dict[str, Any]:
+    """Phase 3: create knowledge files, patch source doc, move proposal to applied.
+
+    Idempotent: if a knowledge_id is already in source doc's atomized_nodes, skip
+    creating that file (crash recovery).
+    Raises StaleDocError if source doc has changed since proposal was created.
+    """
+    pending_dir = Path(pending_dir)
+    applied_dir = Path(applied_dir)
+    vault_root = Path(vault_root)
+
+    proposal_file = pending_dir / f"{proposal_id}.json"
+    if not proposal_file.exists():
+        raise FileNotFoundError(f"Proposal {proposal_id!r} not found in pending")
+
+    proposal = json.loads(proposal_file.read_text(encoding="utf-8"))
+
+    # Resolve doc_path (may be relative to vault_root or absolute)
+    doc_path_str = proposal["doc_path"]
+    doc_path = Path(doc_path_str)
+    if not doc_path.is_absolute():
+        doc_path = vault_root / doc_path_str
+
+    # Read existing atomized_nodes for idempotency (crash recovery)
+    # Do this BEFORE stale-doc check so we can distinguish a true stale doc
+    # from a doc that was already patched by a previous (possibly crashed) apply run.
+    existing_atomized = _read_existing_atomized_nodes(doc_path)
+
+    proposal_kids = {c["knowledge_id"] for c in proposal["claims"]}
+
+    # Stale-doc detection: only raise if it's not a crash-recovery resume.
+    # If all proposal KNOW-IDs are already in atomized_nodes, the doc was patched
+    # by a prior apply run — this is idempotent re-apply, not a true stale doc.
+    current_sha = _sha256(doc_path.read_text(encoding="utf-8"))
+    if current_sha != proposal["doc_sha"]:
+        all_already_applied = proposal_kids.issubset(existing_atomized)
+        if not all_already_applied:
+            raise StaleDocError(
+                f"Source doc {doc_path_str!r} has changed since proposal was created. "
+                "Re-run atomize_scan and atomize_propose."
+            )
+
+    # Determine atomized_from relative path for frontmatter
+    try:
+        atomized_from = str(doc_path.resolve().relative_to(vault_root.resolve()))
+    except ValueError:
+        atomized_from = str(doc_path)
+
+    # Apply claims: write knowledge files, track all KNOW-IDs (existing + new)
+    all_kids: list[str] = list(existing_atomized)
+
+    for claim in proposal["claims"]:
+        kid = claim["knowledge_id"]
+        if kid in existing_atomized:
+            # Already applied in a previous run — mark status and skip file write
+            claim["claim_status"] = "applied"
+            if kid not in all_kids:
+                all_kids.append(kid)
+            continue
+
+        knowledge_file = vault_root / "knowledge" / f"{kid}.md"
+        _write_knowledge_file(
+            path=knowledge_file,
+            knowledge_id=kid,
+            title=claim.get("title", kid),
+            ontology_type=claim.get("ontology_type", "concept"),
+            atomized_from=atomized_from,
+            body=claim.get("body", ""),
+        )
+        claim["claim_status"] = "applied"
+        if kid not in all_kids:
+            all_kids.append(kid)
+
+    # Patch source doc atomized_nodes (idempotent — overwrites with full list)
+    _patch_source_doc_atomized_nodes(doc_path, all_kids)
+
+    # Move proposal from pending/ to applied/
+    applied_dir.mkdir(parents=True, exist_ok=True)
+    proposal_file.rename(applied_dir / f"{proposal_id}.json")
+
+    applied_count = len([c for c in proposal["claims"] if c.get("claim_status") == "applied"])
+    return {
+        "proposal_id": proposal_id,
+        "applied_count": applied_count,
+        "knowledge_files": [f"knowledge/{c['knowledge_id']}.md" for c in proposal["claims"]],
+        "doc_patched": doc_path_str,
     }
