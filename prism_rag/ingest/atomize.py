@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class ScanExpiredError(Exception):
@@ -305,12 +308,22 @@ def atomize_apply_impl(
     vault_root: Path,
     pending_dir: Path,
     applied_dir: Path,
+    graph_path: Path | None = None,
 ) -> dict[str, Any]:
     """Phase 3: create knowledge files, patch source doc, move proposal to applied.
 
     Idempotent: if a knowledge_id is already in source doc's atomized_nodes, skip
     creating that file (crash recovery).
     Raises StaleDocError if source doc has changed since proposal was created.
+
+    Args:
+        proposal_id: UUID of the pending proposal.
+        vault_root: Root of the knowledge vault.
+        pending_dir: Directory holding pending proposal JSON files.
+        applied_dir: Directory to move applied proposal JSON files into.
+        graph_path: Optional path to graph.json; if provided, each new knowledge
+                    file is incrementally ingested into the graph immediately after
+                    creation (skip_embed=True, skip_leiden=True for speed).
     """
     pending_dir = Path(pending_dir)
     applied_dir = Path(applied_dir)
@@ -380,6 +393,27 @@ def atomize_apply_impl(
 
     # Patch source doc atomized_nodes (idempotent — overwrites with full list)
     _patch_source_doc_atomized_nodes(doc_path, all_kids)
+
+    # Incremental graph update for each new knowledge file
+    if graph_path is not None:
+        from prism_rag.config import PrismRagSettings
+        from prism_rag.ingest.incremental import ingest_file
+        _ingest_settings = PrismRagSettings()
+        _ingest_settings.vault_path = vault_root
+        _ingest_settings.data_dir = graph_path.parent
+        for claim in proposal["claims"]:
+            kid = claim["knowledge_id"]
+            knowledge_file = vault_root / "knowledge" / f"{kid}.md"
+            if knowledge_file.exists():
+                try:
+                    ingest_file(
+                        knowledge_file,
+                        settings=_ingest_settings,
+                        skip_embed=True,
+                        skip_leiden=True,
+                    )
+                except Exception as exc:
+                    logger.warning(f"[atomize/apply] incremental ingest failed for {kid}: {exc}")
 
     # Move proposal from pending/ to applied/
     applied_dir.mkdir(parents=True, exist_ok=True)

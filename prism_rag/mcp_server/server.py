@@ -1026,6 +1026,7 @@ def atomize_apply(proposal_id: str) -> str:
             vault_root=vault_root,
             pending_dir=pending_dir,
             applied_dir=applied_dir,
+            graph_path=settings.resolved_graphs[0].data_dir / "graph.json",
         )
         return json.dumps(result, ensure_ascii=False)
     except StaleDocError as e:

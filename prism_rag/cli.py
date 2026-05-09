@@ -18,6 +18,7 @@ from pathlib import Path
 import typer
 
 from prism_rag import __version__
+from prism_rag.cli_atomize import app as atomize_app
 from prism_rag.cluster.leiden import run_leiden
 from prism_rag.config import PrismRagSettings
 from prism_rag.ingest.ast_extractor import extract_ast
@@ -751,6 +752,10 @@ def embed_status() -> None:
             f"model={model}{warning}"
         )
 
+
+# ── Atomize sub-application ─────────────────────────────────────────────────
+
+app.add_typer(atomize_app, name="atomize")
 
 # ── Inbox sub-application ───────────────────────────────────────────────────
 
