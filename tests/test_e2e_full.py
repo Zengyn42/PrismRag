@@ -144,12 +144,12 @@ def two_vaults(tmp_path):
     _create_vault(vault_b, VAULT_B_FILES)
 
     # Ingest vault A
-    docs_a = load_vault(vault_a)
+    docs_a, _ = load_vault(vault_a)
     graph_a = KnowledgeGraph()
     extract_ast(graph_a, docs_a)
 
     # Ingest vault B
-    docs_b = load_vault(vault_b)
+    docs_b, _ = load_vault(vault_b)
     graph_b = KnowledgeGraph()
     extract_ast(graph_b, docs_b)
 
@@ -198,8 +198,8 @@ class TestE2EFullPipeline:
 
     def test_01_vault_loading(self, two_vaults):
         """Vault loader finds all markdown files."""
-        docs_a = load_vault(two_vaults["vault_a"])
-        docs_b = load_vault(two_vaults["vault_b"])
+        docs_a, _ = load_vault(two_vaults["vault_a"])
+        docs_b, _ = load_vault(two_vaults["vault_b"])
         assert len(docs_a) == 4, f"Expected 4 docs in vault_a, got {len(docs_a)}"
         assert len(docs_b) == 3, f"Expected 3 docs in vault_b, got {len(docs_b)}"
 
@@ -359,7 +359,7 @@ class TestE2EFullPipeline:
         )
 
         # Re-ingest vault_b
-        docs_b = load_vault(vault_b)
+        docs_b, _ = load_vault(vault_b)
         graph_b = KnowledgeGraph()
         extract_ast(graph_b, docs_b)
         graph_b.save(data_b / "graph.json")

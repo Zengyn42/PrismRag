@@ -21,7 +21,7 @@ from prism_rag import __version__
 from prism_rag.cluster.leiden import run_leiden
 from prism_rag.config import PrismRagSettings
 from prism_rag.ingest.ast_extractor import extract_ast
-from prism_rag.ingest.embedder import detect_model_device, _load_embed_cache
+from prism_rag.ingest.embedder import detect_model_device, gc_embed_cache, _load_embed_cache
 from prism_rag.ingest.vault_loader import load_vault
 from prism_rag.report.graph_report import generate_report
 from prism_rag.store.graph import KnowledgeGraph
@@ -85,7 +85,7 @@ def ingest(
 
     # ── Pass 1a: Load vault ──
     typer.secho("🔍 Pass 1a: Discovering markdown files...", fg=typer.colors.BLUE)
-    docs = load_vault(settings.vault_path)
+    docs, live_sha_set = load_vault(settings.vault_path)
     typer.echo(f"   Found {len(docs)} markdown files")
 
     if not docs:
@@ -139,6 +139,7 @@ def ingest(
         )
         cache_path = settings.data_dir / "embed_cache.jsonl"
         vectors = compute_embeddings(graph, settings, cache_path=cache_path)
+        gc_embed_cache(cache_path, live_sha_set)
         typer.echo(f"   Embedded {len(vectors)} nodes")
 
         typer.secho("\n🔗 Pass 3b: Generating similarity edges...", fg=typer.colors.BLUE)

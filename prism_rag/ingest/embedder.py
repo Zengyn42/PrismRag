@@ -242,6 +242,41 @@ def _append_cache_entry(
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+def gc_embed_cache(
+    cache_path: Path,
+    live_sha_set: set[tuple[str, str]],
+) -> int:
+    """Remove stale entries from embed_cache.jsonl.
+
+    An entry is stale if its (node_id, sha) pair is not in live_sha_set.
+    Rewrites the file in place. Returns number of entries removed.
+    """
+    if not cache_path.exists():
+        return 0
+
+    cache = _load_embed_cache(cache_path)
+    live = set(live_sha_set)
+    kept: list[dict] = []
+    removed = 0
+    for node_id, (sha, vec) in cache.items():
+        if (node_id, sha) in live:
+            kept.append({"node_id": node_id, "sha": sha, "vec": vec})
+        else:
+            removed += 1
+
+    if removed > 0:
+        with cache_path.open("w", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                for entry in kept:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        logger.info(f"[embedder/gc] removed {removed} stale entries from {cache_path}")
+
+    return removed
+
+
 def _compute_embeddings_ollama(
     graph: KnowledgeGraph,
     settings: PrismRagSettings | None = None,

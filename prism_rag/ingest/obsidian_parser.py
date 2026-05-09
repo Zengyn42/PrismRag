@@ -52,7 +52,7 @@ class ObsidianParser(Parser):
         return "nimbus"
 
     def parse(self, source: Path) -> ParseResult:
-        docs = load_vault(source)
+        docs, _live_sha_set = load_vault(source)
         return self._build_result(docs, source)
 
     # ── Internal build ────────────────────────────────────────────────

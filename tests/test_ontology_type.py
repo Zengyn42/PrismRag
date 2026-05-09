@@ -37,7 +37,7 @@ def test_ontology_type_from_frontmatter(tmp_path):
         "---\n\n"
         "A decision about X"
     )
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
     assert graph.g.nodes["KNOW-D1"]["ontology_type"] == "decision"
@@ -47,7 +47,7 @@ def test_invalid_type_becomes_unclassified(tmp_path):
     """Unknown type: value → ontology_type=unclassified."""
     p = tmp_path / "note.md"
     p.write_text("---\ntype: nonsense\n---\nbody")
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
     assert graph.g.nodes["note"]["ontology_type"] == "unclassified"
@@ -57,7 +57,7 @@ def test_no_type_leaves_ontology_type_none(tmp_path):
     """No type: frontmatter → ontology_type=None."""
     p = tmp_path / "note.md"
     p.write_text("no frontmatter body")
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
     ont = graph.g.nodes["note"].get("ontology_type")
@@ -88,7 +88,8 @@ def test_search_knowledge_filters_by_ontology_type(tmp_path, monkeypatch):
     from prism_rag.ingest.ast_extractor import extract_ast
     from prism_rag.store.graph import KnowledgeGraph as KG
     g = KG()
-    extract_ast(g, lv(vault))
+    _lv_docs, _ = lv(vault)
+    extract_ast(g, _lv_docs)
     g.save(data / "graph.json")
 
     # Reset server state

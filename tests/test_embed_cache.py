@@ -12,6 +12,7 @@ from prism_rag.ingest.embedder import (
     _load_embed_cache,
     _append_cache_entry,
     _compute_embeddings_ollama,
+    gc_embed_cache,
 )
 from prism_rag.store.graph import KnowledgeGraph, Node
 
@@ -139,3 +140,35 @@ def test_compute_embeddings_ollama_reembeds_on_sha_mismatch(tmp_path):
     lines = [json.loads(l) for l in cache_file.read_text().strip().split("\n") if l]
     shas = {l["sha"] for l in lines}
     assert "sha:NEW" in shas
+
+
+def test_gc_embed_cache_removes_stale_entries(tmp_path):
+    cache_file = tmp_path / "embed_cache.jsonl"
+    _append_cache_entry(cache_file, "n1", "sha:1", [0.1])
+    _append_cache_entry(cache_file, "n2", "sha:2", [0.2])   # stale — n2 not in live set
+    _append_cache_entry(cache_file, "n3", "sha:X", [0.3])   # stale — sha changed
+
+    live_sha_set = {("n1", "sha:1"), ("n3", "sha:3")}   # n3 has new sha
+    gc_embed_cache(cache_file, live_sha_set)
+
+    result = _load_embed_cache(cache_file)
+    assert "n1" in result
+    assert "n2" not in result
+    assert "n3" not in result   # sha mismatch, removed
+
+
+def test_gc_embed_cache_no_op_on_missing_file(tmp_path):
+    cache_file = tmp_path / "nonexistent.jsonl"
+    # Should not raise
+    gc_embed_cache(cache_file, {("n1", "sha:1")})
+
+
+def test_gc_embed_cache_rewrites_file(tmp_path):
+    cache_file = tmp_path / "embed_cache.jsonl"
+    for i in range(5):
+        _append_cache_entry(cache_file, f"n{i}", f"sha:{i}", [float(i)])
+    live_sha_set = {("n0", "sha:0"), ("n2", "sha:2")}
+    gc_embed_cache(cache_file, live_sha_set)
+
+    result = _load_embed_cache(cache_file)
+    assert set(result.keys()) == {"n0", "n2"}

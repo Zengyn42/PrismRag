@@ -190,12 +190,17 @@ def discover_vault_files(
     return sorted(results)
 
 
-def load_vault(vault_root: Path) -> list[VaultDocument]:
-    """Load all markdown files from the vault as VaultDocument objects.
+def load_vault(
+    vault_root: Path,
+) -> tuple[list["VaultDocument"], set[tuple[str, str]]]:
+    """Load all markdown files from the vault.
 
-    This is Pass 1a: discovery + frontmatter parsing. Content is held in memory.
-    For large vaults (10k+ files), consider streaming this instead.
+    Returns:
+        (documents, live_sha_set) where live_sha_set = {(node_id, content_hash)}
+        for use in embed_cache GC.
     """
     vault_root = vault_root.expanduser().resolve()
     paths = discover_markdown_files(vault_root)
-    return [VaultDocument.from_path(p, vault_root) for p in paths]
+    docs = [VaultDocument.from_path(p, vault_root) for p in paths]
+    live_sha_set = {(doc.id, doc.content_hash) for doc in docs}
+    return docs, live_sha_set

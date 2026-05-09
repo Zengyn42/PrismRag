@@ -102,7 +102,7 @@ def test_full_ingest_adds_pdf_node(tmp_path):
     graph = KnowledgeGraph()
 
     # Markdown side
-    docs = load_vault(vault)
+    docs, _ = load_vault(vault)
     extract_ast(graph, docs)
 
     # Media side

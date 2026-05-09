@@ -261,7 +261,7 @@ def test_end_to_end_on_real_nimbus_vault(tmp_path):
     paths = discover_markdown_files(VAULT_PATH)
     assert len(paths) > 5, f"Expected >5 md files in NimbusVault, got {len(paths)}"
 
-    docs = load_vault(VAULT_PATH)
+    docs, _ = load_vault(VAULT_PATH)
     assert len(docs) == len(paths)
 
     g = KnowledgeGraph()

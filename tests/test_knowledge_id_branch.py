@@ -44,7 +44,7 @@ def test_knowledge_id_wikilink_resolves(tmp_path):
     b.parent.mkdir()
     b.write_text("See [[KNOW-042]] for details.")
 
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
 
@@ -60,7 +60,7 @@ def test_regular_note_still_kind_note(tmp_path):
     """Files without knowledge_id get kind='note'."""
     p = tmp_path / "regular.md"
     p.write_text("no frontmatter, just body")
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
     assert graph.g.nodes["regular"]["kind"] == "note"
@@ -82,7 +82,7 @@ def test_relations_frontmatter_produces_edges(tmp_path):
         "---\n\nDepends on KNOW-001"
     )
 
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
 
@@ -106,7 +106,7 @@ def test_relations_supersedes_edge_type(tmp_path):
         "---\n\nNew"
     )
 
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
 
@@ -129,7 +129,7 @@ def test_embed_false_skips_node(tmp_path):
     b = tmp_path / "note.md"
     b.write_text("regular content")
 
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
 
@@ -147,7 +147,7 @@ def test_embed_default_true_knowledge_node(tmp_path):
 
     p = tmp_path / "KNOW-X.md"
     p.write_text("---\nknowledge_id: KNOW-X\n---\n\ncontent here")
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     graph = KnowledgeGraph()
     extract_ast(graph, docs)
 
@@ -176,7 +176,8 @@ def test_incremental_ingest_with_knowledge_id(tmp_path):
 
     # Full ingest first (no embedding — no API key)
     g = _KG()
-    extract_ast(g, _lv(vault))
+    _lv_docs, _ = _lv(vault)
+    extract_ast(g, _lv_docs)
     g.save(settings.graph_path)
 
     # Add a new knowledge node with relations

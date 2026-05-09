@@ -15,7 +15,7 @@ def test_collision_same_alias_logs_warning(tmp_path, caplog):
     b = tmp_path / "b.md"
     b.write_text("---\naliases: [foo]\n---\nB")
 
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     caplog.set_level(logging.WARNING, logger="prism_rag.ingest.ast_extractor")
     _build_doc_index(docs)
 
@@ -32,7 +32,7 @@ def test_wikilink_to_ambiguous_is_dropped(tmp_path, caplog):
     c = tmp_path / "c.md"
     c.write_text("See [[foo]]")
 
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     graph = KnowledgeGraph()
     caplog.set_level(logging.WARNING, logger="prism_rag.ingest.ast_extractor")
     extract_ast(graph, docs)
@@ -51,7 +51,7 @@ def test_knowledge_id_beats_filename(tmp_path):
     b.parent.mkdir()
     b.write_text("---\nknowledge_id: foo\n---\nk-node aliased as foo")
 
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     idx = _build_doc_index(docs)
     # "foo" key must resolve to the knowledge-id owner
     assert idx["foo"] == "foo"  # doc.id === knowledge_id === "foo"
@@ -66,7 +66,7 @@ def test_canonical_flag_beats_filename(tmp_path):
     b.parent.mkdir()
     b.write_text("---\naliases: [bar]\ncanonical: true\n---\nCanonical definition")
 
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     idx = _build_doc_index(docs)
     assert idx["bar"] == "docs/canonical-bar"
 
@@ -80,6 +80,6 @@ def test_knowledge_dir_beats_plain_file(tmp_path):
     b.parent.mkdir()
     b.write_text("knowledge baz")  # no knowledge_id, no canonical — just the directory signal
 
-    docs = load_vault(tmp_path)
+    docs, _ = load_vault(tmp_path)
     idx = _build_doc_index(docs)
     assert idx["baz"] == "knowledge/baz"
