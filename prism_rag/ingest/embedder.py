@@ -53,6 +53,27 @@ _OLLAMA_DEFAULT_MODEL = "bge-m3"
 _OLLAMA_DEFAULT_HOST = "http://localhost:11434"
 
 
+def detect_model_device(model: str, host: str) -> str:
+    """Query Ollama /api/ps to find which device the model is using.
+
+    Returns "gpu" | "cpu" | "unknown".
+    """
+    import urllib.request
+    import json as _json
+
+    try:
+        url = f"{host.rstrip('/')}/api/ps"
+        req = urllib.request.Request(url, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = _json.loads(resp.read())
+        for entry in body.get("models", []):
+            if model in entry.get("name", ""):
+                return "gpu" if entry.get("size_vram", 0) > 0 else "cpu"
+    except Exception:
+        pass
+    return "unknown"
+
+
 class OllamaEmbedder:
     """Embed text via a local Ollama model (default: bge-m3, dim=1024).
 
@@ -252,6 +273,16 @@ def _compute_embeddings_ollama(
 
     model = settings.ollama_model if settings else _OLLAMA_DEFAULT_MODEL
     host = settings.ollama_host if settings else _OLLAMA_DEFAULT_HOST
+
+    device = detect_model_device(model, host)
+    if device == "cpu":
+        logger.warning(
+            f"[embedder/ollama] model={model} is running on CPU. "
+            "Embedding will be very slow. Wait for GPU to be free and retry."
+        )
+    elif device == "unknown":
+        logger.info(f"[embedder/ollama] could not detect device for model={model}")
+
     embedder = OllamaEmbedder(model=model, base_url=host, timeout=_OLLAMA_TIMEOUT)
     total = len(pending)
     logger.info(
