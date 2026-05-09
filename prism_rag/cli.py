@@ -21,6 +21,7 @@ from prism_rag import __version__
 from prism_rag.cluster.leiden import run_leiden
 from prism_rag.config import PrismRagSettings
 from prism_rag.ingest.ast_extractor import extract_ast
+from prism_rag.ingest.embedder import detect_model_device, _load_embed_cache
 from prism_rag.ingest.vault_loader import load_vault
 from prism_rag.report.graph_report import generate_report
 from prism_rag.store.graph import KnowledgeGraph
@@ -703,6 +704,51 @@ def classify_edges_cmd() -> None:
 def version() -> None:
     """Print PrismRag version."""
     typer.echo(f"PrismRag v{__version__}")
+
+
+@app.command(name="embed-status")
+def embed_status() -> None:
+    """Show embedding progress per namespace (cached vs pending)."""
+    settings = PrismRagSettings()
+    model = settings.ollama_model
+    host = settings.ollama_host
+    device = detect_model_device(model, host)
+
+    typer.echo(f"model={model}  device={device}")
+    typer.echo("")
+
+    for gs in settings.resolved_graphs:
+        ns = gs.namespace or "default"
+        data_dir = gs.data_dir
+        graph_path = data_dir / "graph.json"
+        cache_path = data_dir / "embed_cache.jsonl"
+
+        if not graph_path.exists():
+            typer.echo(f"  namespace={ns}  [no graph.json]")
+            continue
+
+        kg = KnowledgeGraph.load(graph_path)
+        # Embeddable = nodes with content (kind doesn't matter for status purposes)
+        embeddable_nodes = [
+            (nid, data)
+            for nid, data in kg.g.nodes(data=True)
+            if data.get("content", "").strip()
+        ]
+        total = len(embeddable_nodes)
+
+        cache = _load_embed_cache(cache_path) if cache_path.exists() else {}
+        embedded = sum(
+            1 for nid, data in embeddable_nodes
+            if nid in cache and cache[nid][0] == data.get("content_hash", "")
+        )
+        pending = total - embedded
+
+        warning = "  [WARNING: GPU not active]" if device == "cpu" else ""
+        typer.echo(
+            f"  namespace={ns:<12} nodes={total:<6} "
+            f"embedded={embedded:<6} pending={pending:<6} "
+            f"model={model}{warning}"
+        )
 
 
 # ── Inbox sub-application ───────────────────────────────────────────────────
