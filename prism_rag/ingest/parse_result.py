@@ -64,6 +64,9 @@ class NodeRecord(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    # v5.3: knowledge_id promoted to first-class field; mirrors metadata["know_id"] for knowledge nodes
+    knowledge_id: str | None = None
+
     @model_validator(mode="after")
     def check_tier_range(self) -> Self:
         lo, hi = _TIER_RANGES[self.confidence_tier]
@@ -158,6 +161,7 @@ class ParseResult(BaseModel):
                 confidence_tier=tier,
                 confidence=conf,
                 metadata=node.metadata,
+                knowledge_id=node.metadata.get("know_id"),
             ))
 
             if parent_id is not None:

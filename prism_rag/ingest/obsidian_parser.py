@@ -51,9 +51,22 @@ class ObsidianParser(Parser):
     def namespace(self) -> str:
         return "nimbus"
 
-    def parse(self, source: Path) -> ParseResult:
-        docs, _live_sha_set = load_vault(source)
-        return self._build_result(docs, source)
+    def parse(self, source, vault_root: Path | None = None) -> ParseResult:  # type: ignore[override]
+        """Parse an Obsidian vault.
+
+        Args:
+            source: Either a Path to the vault root, or a pre-loaded list of
+                VaultDocument objects (used in tests to avoid double-loading).
+            vault_root: Required when source is a list of VaultDocument objects;
+                used to anchor relative paths.
+        """
+        if isinstance(source, Path):
+            docs, _live_sha_set = load_vault(source)
+            return self._build_result(docs, source)
+        # source is a list[VaultDocument]
+        if vault_root is None:
+            raise ValueError("vault_root must be provided when source is a list of VaultDocument")
+        return self._build_result(source, vault_root)
 
     # ── Internal build ────────────────────────────────────────────────
 
@@ -78,15 +91,16 @@ class ObsidianParser(Parser):
         all_categories: set[str] = set()
 
         for doc in docs:
-            kind = "knowledge" if doc.frontmatter.get("knowledge_id") else "note"
+            kid = doc.frontmatter.get("knowledge_id")
+            kind = "knowledge" if kid else "note"
             meta: dict = {
                 "frontmatter": doc.frontmatter,
                 "tags": doc.frontmatter_tags,
             }
             if kind == "knowledge":
-                meta["know_id"] = str(doc.frontmatter["knowledge_id"])
+                meta["know_id"] = str(kid)  # also kept in metadata for legacy callers
 
-            root.add_child(TreeNode(
+            tnode = TreeNode(
                 id=doc.id,
                 kind=kind,
                 label=doc.label,
@@ -96,7 +110,8 @@ class ObsidianParser(Parser):
                 content_hash=doc.content_hash,
                 tokens=_token_count(doc.content),
                 metadata=meta,
-            ))
+            )
+            root.add_child(tnode)
 
             all_tags.update(set(doc.frontmatter_tags) | _extract_inline_tags(doc.content))
             if doc.category:

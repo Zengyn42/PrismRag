@@ -116,6 +116,9 @@ class Node:
     # Semantic ontology type (Vault Phase 2). Populated from frontmatter.type.
     ontology_type: OntologyType | None = None
 
+    # v5.3: knowledge_id (KNOW-NNNNNN) as first-class field; also stored in metadata["know_id"]
+    knowledge_id: str | None = None
+
     # v5.0: parser namespace ("nimbus" | "code" | "conv"). Default nimbus for backward compat.
     namespace: str = "nimbus"
 
