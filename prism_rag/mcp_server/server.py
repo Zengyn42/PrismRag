@@ -48,6 +48,7 @@ from prism_rag.retrieve.impact import format_impact_report, impact_bfs
 from prism_rag.store.bm25_index import BM25Index
 from prism_rag.store.federated import FederatedGraph
 from prism_rag.store.graph import KnowledgeGraph
+from prism_rag.store.registry import Registry
 
 logger = logging.getLogger(__name__)
 
@@ -916,6 +917,50 @@ def review_pending_edge(edge_id: str, decision: str, note: str = "") -> str:
             nimbus.save(nimbus_src.graph_path)
 
     return json.dumps({"status": "ok", "edge_id": edge_id, "decision": decision, "note": note})
+
+
+# -- Tool: alloc_knowledge_id --------------------------------------------------
+
+@mcp.tool()
+def alloc_knowledge_id(count: int = 1) -> str:
+    """Allocate one or more KNOW-IDs for new knowledge nodes.
+    Returns JSON with an "ids" list of allocated KNOW-IDs (format: KNOW-NNNNNN).
+    IDs are globally unique and never reused. Use before calling atomize_propose.
+    NOT a search tool — use search_knowledge() for finding existing nodes.
+    """
+    settings = PrismRagSettings()
+    registry_path = settings.data_dir / "registry.json"
+    reg = Registry(registry_path)
+    ids = reg.batch_alloc(max(1, count))
+    return json.dumps({"ids": ids}, ensure_ascii=False)
+
+
+# -- Tool: list_knowledge_nodes ------------------------------------------------
+
+@mcp.tool()
+def list_knowledge_nodes(namespace: str = "") -> str:
+    """List all knowledge nodes (kind="knowledge") in the graph.
+    Returns JSON with a "nodes" list, each entry having id, label, knowledge_id, namespace.
+    namespace="" searches all namespaces; namespace="nimbus" restricts to vault docs.
+    NOT a full search — returns ALL knowledge nodes. Use search_knowledge() for topic queries.
+    """
+    fg = _ensure_federated()
+    target_namespaces = [namespace] if namespace else fg.namespaces
+    results = []
+    for ns in target_namespaces:
+        graph = fg.get_graph(ns)
+        if graph is None:
+            continue
+        for node_id, data in graph.g.nodes(data=True):
+            if data.get("kind") == "knowledge":
+                results.append({
+                    "id": node_id,
+                    "label": data.get("label", node_id),
+                    "knowledge_id": data.get("knowledge_id"),
+                    "namespace": ns,
+                    "tokens": data.get("tokens", 0),
+                })
+    return json.dumps({"nodes": results, "total": len(results)}, ensure_ascii=False)
 
 
 # -- MCP Resources -----------------------------------------------------------
