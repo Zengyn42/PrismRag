@@ -983,6 +983,27 @@ def atomize_scan(doc_path: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+# -- Tool: atomize_propose -----------------------------------------------------
+
+@mcp.tool()
+def atomize_propose(scan_id: str, claims: list[dict]) -> str:
+    """Submit semantic claims for a scanned document to create an atomization proposal.
+    Returns JSON with proposal_id and claim summaries.
+    Each claim must have: section_id (from atomize_scan), knowledge_id (from alloc_knowledge_id),
+    title, body, ontology_type. Raises error if scan_id is expired or not found.
+    See atomize_apply() for the next step.
+    """
+    from prism_rag.ingest.atomize import atomize_propose_impl, ScanExpiredError
+    settings = PrismRagSettings()
+    scan_dir = settings.data_dir / "atomize-proposals" / "scan_cache"
+    proposal_dir = settings.data_dir / "atomize-proposals" / "pending"
+    try:
+        result = atomize_propose_impl(scan_id=scan_id, claims=claims, scan_dir=scan_dir, proposal_dir=proposal_dir)
+        return json.dumps(result, ensure_ascii=False)
+    except ScanExpiredError as e:
+        return json.dumps({"error": str(e), "error_type": "ScanExpiredError"}, ensure_ascii=False)
+
+
 # -- MCP Resources -----------------------------------------------------------
 #
 # Large reference material is exposed as resources (read on demand) rather than

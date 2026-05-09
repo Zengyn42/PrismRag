@@ -141,3 +141,89 @@ def atomize_scan_impl(
         "section_count": len(public_sections),
         "sections": public_sections,
     }
+
+
+def atomize_propose_impl(
+    scan_id: str,
+    claims: list[dict[str, Any]],
+    scan_dir: Path,
+    proposal_dir: Path,
+) -> dict[str, Any]:
+    """Phase 2: validate claims against scan cache, write proposal file.
+
+    Args:
+        scan_id: from atomize_scan result
+        claims: list of claim dicts with keys: section_id, knowledge_id, title, body, ontology_type
+        scan_dir: where scan cache lives
+        proposal_dir: where to write pending proposals
+
+    Returns:
+        dict with proposal_id and claim summary
+    """
+    from datetime import timedelta
+
+    scan_dir = Path(scan_dir)
+    cache_file = scan_dir / f"{scan_id}.json"
+    if not cache_file.exists():
+        raise ScanExpiredError(f"Scan {scan_id!r} not found in cache")
+
+    cached = json.loads(cache_file.read_text(encoding="utf-8"))
+
+    # Check TTL
+    scanned_at = datetime.fromisoformat(cached["scanned_at"])
+    age = datetime.now(timezone.utc) - scanned_at
+    if age.total_seconds() > _SCAN_TTL_HOURS * 3600:
+        raise ScanExpiredError(f"Scan {scan_id!r} expired ({age.total_seconds()/3600:.1f}h old)")
+
+    # Build valid section_id set and snapshot lookup
+    snapshot_map: dict[str, str] = {}
+    for s in cached["sections"]:
+        snapshot_map[s["section_id"]] = s.get("content_snapshot", "")
+
+    # Deduplicate by knowledge_id (first wins)
+    seen_kids: set[str] = set()
+    validated_claims: list[dict[str, Any]] = []
+    for claim in claims:
+        kid = claim.get("knowledge_id", "")
+        if kid in seen_kids:
+            continue
+        seen_kids.add(kid)
+        sid = str(claim.get("section_id", ""))
+        snapshot = snapshot_map.get(sid, "")
+        validated_claims.append({
+            "section_id": sid,
+            "knowledge_id": kid,
+            "title": claim.get("title", ""),
+            "body": claim.get("body", ""),
+            "ontology_type": claim.get("ontology_type", "concept"),
+            "content_snapshot": snapshot,
+            "claim_status": "pending",
+        })
+
+    proposal_id = str(uuid.uuid4())
+    proposal_dir = Path(proposal_dir)
+    proposal_dir.mkdir(parents=True, exist_ok=True)
+
+    proposal = {
+        "proposal_id": proposal_id,
+        "scan_id": scan_id,
+        "doc_path": cached["doc_path"],
+        "doc_sha": cached["doc_sha"],
+        "proposed_at": datetime.now(timezone.utc).isoformat(),
+        "claims": validated_claims,
+    }
+
+    (proposal_dir / f"{proposal_id}.json").write_text(
+        json.dumps(proposal, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    return {
+        "proposal_id": proposal_id,
+        "doc_path": cached["doc_path"],
+        "doc_sha": cached["doc_sha"],
+        "claim_count": len(validated_claims),
+        "claims": [
+            {"knowledge_id": c["knowledge_id"], "title": c["title"], "claim_status": c["claim_status"]}
+            for c in validated_claims
+        ],
+    }
