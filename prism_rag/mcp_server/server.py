@@ -963,6 +963,26 @@ def list_knowledge_nodes(namespace: str = "") -> str:
     return json.dumps({"nodes": results, "total": len(results)}, ensure_ascii=False)
 
 
+# -- Tool: atomize_scan --------------------------------------------------------
+
+@mcp.tool()
+def atomize_scan(doc_path: str) -> str:
+    """Scan a vault document and return its section structure for atomization.
+    Returns JSON with scan_id, doc_sha, and a list of sections (heading, section_id, token_estimate).
+    Content is NOT returned — only structure. Use scan_id in atomize_propose to submit claims.
+    Does NOT modify the document. See atomize_propose() for the next step.
+    """
+    from prism_rag.ingest.atomize import atomize_scan_impl
+    settings = PrismRagSettings()
+    scan_dir = settings.data_dir / "atomize-proposals" / "scan_cache"
+    # Resolve vault_root: use first resolved graph's vault_path (covers both
+    # single-vault and multi-graph setups), falling back to settings.vault_path.
+    resolved = settings.resolved_graphs
+    vault_root = resolved[0].vault_path if resolved else settings.vault_path
+    result = atomize_scan_impl(Path(doc_path), vault_root=vault_root, scan_dir=scan_dir)
+    return json.dumps(result, ensure_ascii=False)
+
+
 # -- MCP Resources -----------------------------------------------------------
 #
 # Large reference material is exposed as resources (read on demand) rather than
