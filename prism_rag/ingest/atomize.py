@@ -147,6 +147,11 @@ def atomize_scan_impl(
         "doc_sha": doc_sha,
         "section_count": len(public_sections),
         "sections": public_sections,
+        "hint": (
+            "Section content is NOT included here. "
+            "Call read_note(doc_path) first to read the full document, "
+            "then use this scan result to propose claims with atomize_propose."
+        ),
     }
 
 
