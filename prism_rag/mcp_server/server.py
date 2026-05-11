@@ -1032,6 +1032,8 @@ def atomize_apply(proposal_id: str) -> str:
             applied_dir=applied_dir,
             graph_path=settings.resolved_graphs[0].data_dir / "graph.json",
         )
+        global _federated
+        _federated = None  # Force full reload so new KNOW nodes are visible immediately
         return json.dumps(result, ensure_ascii=False)
     except StaleDocError as e:
         return json.dumps({"error": str(e), "error_type": "StaleDocError"}, ensure_ascii=False)
