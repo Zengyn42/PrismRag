@@ -109,6 +109,7 @@ class FederatedGraph:
         return self._bridges
 
     def get_graph(self, namespace: str) -> KnowledgeGraph | None:
+        self._maybe_reload()
         return self._graphs.get(namespace)
 
     def get_node(self, qualified_id: str) -> dict[str, Any] | None:
