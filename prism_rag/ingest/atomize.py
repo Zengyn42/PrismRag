@@ -420,6 +420,54 @@ def atomize_apply_impl(
                 except Exception as exc:
                     logger.warning(f"[atomize/apply] incremental ingest failed for {kid}: {exc}")
 
+        # Embed new KNOW nodes in one batch, relink similarity edges, recluster.
+        try:
+            from prism_rag.store.graph import KnowledgeGraph, Node
+            from prism_rag.store.embedding_store import EmbeddingStore
+            from prism_rag.ingest.embedder import compute_embeddings
+            from prism_rag.ingest.similarity_linker import link_similar_nodes
+            from prism_rag.cluster.leiden import run_leiden
+            from prism_rag.report.graph_report import generate_report
+
+            graph = KnowledgeGraph.load(_ingest_settings.graph_path)
+            store = EmbeddingStore(_ingest_settings.embedding_cache_path, dim=_ingest_settings.embedding_dim)
+
+            new_kids = [c["knowledge_id"] for c in proposal["claims"] if c.get("claim_status") == "applied"]
+            temp_graph = KnowledgeGraph()
+            for kid in new_kids:
+                if store.get(kid) is None and kid in graph.g:
+                    node_data = graph.g.nodes[kid]
+                    temp_graph.add_node(Node(
+                        id=kid,
+                        label=node_data.get("label", kid),
+                        kind="knowledge",
+                        content=node_data.get("content", ""),
+                        tokens=node_data.get("tokens", 0),
+                    ))
+
+            if temp_graph.node_count > 0:
+                vectors = compute_embeddings(temp_graph, _ingest_settings)
+                for nid, vec in vectors.items():
+                    store.upsert(nid, vec)
+                logger.info(f"[atomize/apply] embedded {len(vectors)} new KNOW nodes")
+
+            all_vectors = store.all_embeddings()
+            stale_sim = [(u, v) for u, v, d in graph.g.edges(data=True) if d.get("source_pass") == "embedding"]
+            for u, v in stale_sim:
+                if graph.g.has_edge(u, v):
+                    graph.g.remove_edge(u, v)
+            link_similar_nodes(graph, all_vectors, _ingest_settings)
+
+            graph.communities.clear()
+            run_leiden(graph, resolution=_ingest_settings.leiden_resolution, seed=_ingest_settings.leiden_seed)
+            graph.save(_ingest_settings.graph_path)
+            try:
+                generate_report(graph, _ingest_settings.report_path, vault_root=vault_root)
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.warning(f"[atomize/apply] post-apply embedding pass failed: {exc}")
+
     # Move proposal from pending/ to applied/
     applied_dir.mkdir(parents=True, exist_ok=True)
     proposal_file.rename(applied_dir / f"{proposal_id}.json")
