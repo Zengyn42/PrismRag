@@ -979,7 +979,11 @@ def atomize_scan(doc_path: str) -> str:
     # single-vault and multi-graph setups), falling back to settings.vault_path.
     resolved = settings.resolved_graphs
     vault_root = resolved[0].vault_path if resolved else settings.vault_path
-    result = atomize_scan_impl(Path(doc_path), vault_root=vault_root, scan_dir=scan_dir)
+    # Accept relative paths (relative to vault_root), same as read_note behaviour.
+    p = Path(doc_path)
+    if not p.is_absolute():
+        p = vault_root / p
+    result = atomize_scan_impl(p, vault_root=vault_root, scan_dir=scan_dir)
     return json.dumps(result, ensure_ascii=False)
 
 

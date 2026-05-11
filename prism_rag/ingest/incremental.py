@@ -117,6 +117,7 @@ def _add_single_doc_ast(
         confidence=_confidence if _confidence in ("high", "medium", "low") else None,
         actionability=_actionability if _actionability in ("reference", "decision", "task") else None,
         ontology_type=_ont,
+        knowledge_id=str(fm.get("knowledge_id")) if fm.get("knowledge_id") else None,
     )
     graph.add_node(note)
 
