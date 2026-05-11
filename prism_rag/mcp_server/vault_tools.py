@@ -78,11 +78,10 @@ def _resolve_vault(namespace: str = "") -> Union[tuple[Vault, GraphSource], dict
     elif len(graphs) == 1:
         src = graphs[0]
     else:
-        return fail(
-            VaultErrorCode.VALIDATION_ERROR,
-            "Multiple namespaces loaded. Specify the namespace parameter.",
-            available=[s.namespace for s in graphs],
-        )
+        # Multi-namespace: prefer the first non-code namespace (i.e. primary vault).
+        # LLMs should not need to specify namespace for everyday vault reads/writes.
+        non_code = [s for s in graphs if s.namespace != "code"]
+        src = non_code[0] if non_code else graphs[0]
 
     return Vault(src.vault_path), src
 
