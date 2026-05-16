@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from prism_rag.ingest.label_resolver import resolve_knowledge_label
+
 from prism_rag.config import PrismRagSettings
 from prism_rag.ingest.ast_extractor import extract_ast
 from prism_rag.ingest.vault_loader import VaultDocument
@@ -104,9 +106,14 @@ def _add_single_doc_ast(
         _ont = "unclassified"
 
     # Add note/knowledge node
+    # P4: KNOW nodes use frontmatter title → clean_slug → stem fallback for readable labels.
+    # Judgment via frontmatter.get('knowledge_id') — same signal used above for kind,
+    # avoids relying on doc.kind lifecycle readiness in the incremental path.
+    _is_knowledge = bool(doc.frontmatter.get('knowledge_id'))
+    _label = resolve_knowledge_label(doc.frontmatter, doc.path.stem) if _is_knowledge else doc.label
     note = Node(
         id=doc.id,
-        label=doc.label,
+        label=_label,
         kind=kind,
         source_file=str(doc.relative_path),
         content=doc.content,

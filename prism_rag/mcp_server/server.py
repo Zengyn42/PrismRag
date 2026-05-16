@@ -145,6 +145,8 @@ def _node_summary(graph: KnowledgeGraph, node_id: str, include_content: bool = F
         "community": data.get("community_id", ""),
         "degree": graph.degree(node_id),
     }
+    if data.get("knowledge_id"):
+        summary["knowledge_id"] = data["knowledge_id"]
     if data.get("source_file"):
         summary["source_file"] = data["source_file"]
     if include_content and data.get("content"):
@@ -202,7 +204,30 @@ def search_knowledge(
     scope="nimbus" for vault/design-doc nodes; scope="code" for code symbols; scope="" for both.
     mode="bfs" for broad topic context; mode="dfs" to follow call/reference chains.
     ontology_type filters to a specific type e.g. "decision", "concept", "fact" (see prismrag://schema).
+
+    如果你已有 KNOW-ID（如 'KNOW-000008'），请改用 explain_node 直接读取，不要用此工具做 ID 查找。
     """
+    import re as _re
+    # P2: soft hint — pure KNOW-ID queries must use explain_node, not semantic search.
+    # Inserted BEFORE _ensure_federated() so no graph load is triggered for invalid queries.
+    _q = query.strip()
+    _kid_match = _re.match(r'^(KNOW-(\d+))$', _q, _re.IGNORECASE)
+    if _kid_match:
+        digits = _kid_match.group(2)
+        kid_upper = _kid_match.group(1).upper()
+        if len(digits) >= 6:
+            hint_msg = (
+                f"⚠️ 未执行搜索。检测到精确节点 ID 格式（{kid_upper}），"
+                f"请立即调用 explain_node(node='{kid_upper}') 查询此节点。"
+                "results 为空不代表该知识不存在。"
+            )
+        else:
+            hint_msg = (
+                f"⚠️ 未执行搜索。检测到疑似节点 ID 但格式不完整（{kid_upper}，"
+                "KNOW-ID 至少需要 6 位数字），请确认完整 ID 后调用 explain_node。"
+            )
+        return json.dumps({"hint": hint_msg, "results": []}, ensure_ascii=False)
+
     fg = _ensure_federated()
 
     # Hybrid entry-point selection: BM25 + embedding + exact, fused via RRF
@@ -286,17 +311,36 @@ def search_knowledge(
 
 @mcp.tool()
 def explain_node(node: str, scope: str = "") -> str:
-    """Return all edges (incoming/outgoing), community membership, and full content for a single graph node.
+    """根据节点 ID 或名称读取完整节点内容及邻边。当你持有 KNOW-NNNNNN ID 时，必须使用此工具，
+    而非 search_knowledge——语义搜索无法可靠匹配数字 ID。
+
     Returns JSON with node metadata, outgoing_edges list, incoming_edges list, and community info.
     Does NOT rank or filter edges — returns everything. Use search_knowledge() for ranked traversal from a starting point.
 
     scope narrows lookup to a single namespace; omit to search all namespaces.
     Node lookup is by exact label or ID. Returns an error object if the node is not found.
     """
+    import re as _re
     fg = _ensure_federated()
     entries = resolve_entry_points(fg, node, scope=scope or None)
     if not entries:
-        return json.dumps({"error": f"Node not found: {node!r}"}, ensure_ascii=False)
+        # P2: smart error — distinguish "dirty ID" from "pure natural language"
+        # to prevent search→explain→search ping-pong loops.
+        _embedded = _re.search(r'KNOW-(\d{6,})', node, _re.IGNORECASE)
+        if _embedded:
+            clean_id = f"KNOW-{_embedded.group(1)}"
+            return json.dumps({
+                "error": (
+                    f"输入包含额外文本，无法精确匹配节点。"
+                    f"请仅传入纯 ID 重新调用：explain_node(node='{clean_id}')"
+                )
+            }, ensure_ascii=False)
+        return json.dumps({
+            "error": (
+                f"未找到精确匹配的节点：{node!r}。"
+                "若需语义搜索请使用 search_knowledge。"
+            )
+        }, ensure_ascii=False)
 
     ns, node_id = entries[0]
     graph = fg.get_graph(ns)

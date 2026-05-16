@@ -29,6 +29,7 @@ from prism_rag.ingest.ast_extractor import (
 )
 from prism_rag.ingest.base_parser import Parser
 from prism_rag.ingest.base_tree import ParseTree, TreeNode
+from prism_rag.ingest.label_resolver import resolve_knowledge_label
 from prism_rag.ingest.parse_result import EdgeRecord, ParseResult
 from prism_rag.ingest.vault_loader import VaultDocument, load_vault
 
@@ -100,10 +101,13 @@ class ObsidianParser(Parser):
             if kind == "knowledge":
                 meta["know_id"] = str(kid)  # also kept in metadata for legacy callers
 
+            # P4: KNOW nodes use title → clean_slug → stem fallback for readable labels.
+            _is_knowledge = bool(kid)
+            _label = resolve_knowledge_label(doc.frontmatter, doc.path.stem) if _is_knowledge else doc.label
             tnode = TreeNode(
                 id=doc.id,
                 kind=kind,
-                label=doc.label,
+                label=_label,
                 content=doc.content,
                 namespace="nimbus",
                 source_file=str(doc.relative_path),
