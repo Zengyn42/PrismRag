@@ -60,10 +60,18 @@ _embedding_stores: dict = {}   # dict[str, EmbeddingStore]
 _embedder = None               # OllamaEmbedder | GeminiEmbedder | None
 _cross_ns_probe = None         # CrossNamespaceProbe | None
 
+try:
+    _startup_settings = PrismRagSettings()
+    _vault_hint = f"Vault root: {_startup_settings.vault_path}. "
+except Exception:
+    _vault_hint = ""
+
 mcp = FastMCP(
     "PrismRag",
     instructions=(
         "PrismRag: graph-first RAG system for Obsidian vaults and code repositories. "
+        f"{_vault_hint}"
+        "File paths in atomize_scan/read_note/write_note are relative to vault root. "
         "Exposes graph query tools (search, explain, path, communities, impact, drift) "
         "and vault CRUD tools (read, write, patch, move, delete, tags, links). "
         "Read prismrag://namespaces to see which namespace covers which codebase or vault."
@@ -938,11 +946,25 @@ def alloc_knowledge_id(count: int = 1) -> str:
 # -- Tool: list_knowledge_nodes ------------------------------------------------
 
 @mcp.tool()
-def list_knowledge_nodes(namespace: str = "") -> str:
-    """List all knowledge nodes (kind="knowledge") in the graph.
-    Returns JSON with a "nodes" list, each entry having id, label, knowledge_id, namespace.
-    namespace="" searches all namespaces; namespace="nimbus" restricts to vault docs.
-    NOT a full search — returns ALL knowledge nodes. Use search_knowledge() for topic queries.
+def list_knowledge_nodes(
+    namespace: str = "",
+    ktype: str = "",
+    status: str = "active",
+    max_results: int = 20,
+) -> str:
+    """List knowledge nodes (kind="knowledge") in the graph.
+
+    Returns JSON with a "nodes" list. Each entry has:
+      id, label, knowledge_id, namespace, tokens, body_preview (first 50 chars of content).
+
+    Args:
+        namespace: Filter by namespace ("nimbus", "code", etc.). "" = all namespaces.
+        ktype: Reserved for future ontology-type filtering. Currently unused.
+        status: Reserved for future status filtering. Currently unused.
+        max_results: Maximum nodes to return (default 20). Prevents token bloat on large vaults.
+
+    NOT a full search — iterates ALL knowledge nodes then truncates. Use search_knowledge()
+    for topic queries. If you already have a KNOW-ID, use explain_node() instead.
     """
     fg = _ensure_federated()
     target_namespaces = [namespace] if namespace else fg.namespaces
@@ -959,8 +981,12 @@ def list_knowledge_nodes(namespace: str = "") -> str:
                     "knowledge_id": data.get("knowledge_id"),
                     "namespace": ns,
                     "tokens": data.get("tokens", 0),
+                    "body_preview": data.get("content", "")[:50],
                 })
-    return json.dumps({"nodes": results, "total": len(results)}, ensure_ascii=False)
+    total = len(results)
+    if len(results) > max_results:
+        results = results[:max_results]
+    return json.dumps({"nodes": results, "total": total, "returned": len(results)}, ensure_ascii=False)
 
 
 # -- Tool: atomize_scan --------------------------------------------------------

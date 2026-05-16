@@ -1,3 +1,10 @@
+---
+atomized_nodes:
+- KNOW-000016
+- KNOW-000017
+- KNOW-000018
+---
+
 # Embedding Similarity Bridges Design
 
 > Date: 2026-04-13
