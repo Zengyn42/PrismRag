@@ -87,6 +87,10 @@ def test_serve_fails_gracefully_when_no_graph(tmp_path):
     env["PRISM_VAULT_PATH"] = str(empty_vault)
     env["PRISM_DATA_DIR"] = str(empty_data)
     env["PRISM_GEMINI_API_KEY"] = ""
+    # Override PRISM_GRAPHS to empty so subprocess falls back to vault_path/data_dir.
+    # Can't use pop() because the .env file would still supply the real value;
+    # setting [] overrides .env and resolved_graphs() treats [] as "not configured".
+    env["PRISM_GRAPHS"] = "[]"
 
     result = subprocess.run(
         _prism_rag_cmd() + ["serve", "--transport", "stdio"],

@@ -277,7 +277,7 @@ class PrismRagSettings(BaseSettings):
         Otherwise synthesize a single GraphSource from the legacy
         ``vault_path`` / ``data_dir`` pair with namespace ``"default"``.
         """
-        if self.graphs is not None:
+        if self.graphs:  # None or empty list → fall back to legacy vault_path/data_dir
             return self.graphs
         return [
             GraphSource(

@@ -33,7 +33,9 @@ class TestSettingsBackwardCompat:
         """Old-style PRISM_VAULT_PATH + PRISM_DATA_DIR still works."""
         monkeypatch.setenv("PRISM_VAULT_PATH", str(tmp_path / "vault"))
         monkeypatch.setenv("PRISM_DATA_DIR", str(tmp_path / "data"))
-        monkeypatch.delenv("PRISM_GRAPHS", raising=False)
+        # Use setenv("PRISM_GRAPHS", "[]") instead of delenv so pydantic-settings
+        # env var takes priority over the .env file which may have PRISM_GRAPHS set.
+        monkeypatch.setenv("PRISM_GRAPHS", "[]")
         s = PrismRagSettings()
         graphs = s.resolved_graphs
         assert len(graphs) == 1
@@ -535,7 +537,8 @@ class TestMCPFederatedIntegration:
 
         monkeypatch.setenv("PRISM_VAULT_PATH", str(tmp_path / "vault"))
         monkeypatch.setenv("PRISM_DATA_DIR", str(d))
-        monkeypatch.delenv("PRISM_GRAPHS", raising=False)
+        # Override PRISM_GRAPHS so .env file value doesn't bleed in
+        monkeypatch.setenv("PRISM_GRAPHS", "[]")
 
         mcp_mod._federated = None
         fg = mcp_mod._ensure_federated()

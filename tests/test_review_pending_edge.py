@@ -36,7 +36,8 @@ def env(tmp_path: Path, monkeypatch):
 
 
 def test_list_pending_edges_returns_pending(env):
-    out = mcp_server.list_pending_edges(top_n=10)
+    # pending_edges() without edge_id → list mode
+    out = mcp_server.pending_edges(top_n=10)
     parsed = json.loads(out)
     assert isinstance(parsed, list)
     assert any(e["id"] == "e1" for e in parsed)
@@ -44,7 +45,8 @@ def test_list_pending_edges_returns_pending(env):
 
 
 def test_get_pending_edge_context(env):
-    out = mcp_server.get_pending_edge_context("e1")
+    # pending_edges(edge_id=...) → context mode
+    out = mcp_server.pending_edges(edge_id="e1")
     parsed = json.loads(out)
     assert "vault_context" in parsed
     assert "code_context" in parsed
@@ -52,7 +54,7 @@ def test_get_pending_edge_context(env):
 
 
 def test_get_pending_edge_context_unknown(env):
-    out = mcp_server.get_pending_edge_context("does-not-exist")
+    out = mcp_server.pending_edges(edge_id="does-not-exist")
     parsed = json.loads(out)
     assert parsed.get("status") == "error"
 
