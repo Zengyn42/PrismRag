@@ -66,7 +66,15 @@ class VaultDocument:
 
     @property
     def label(self) -> str:
-        """Human-readable label: filename stem."""
+        """Human-readable label.
+
+        For knowledge nodes (frontmatter has knowledge_id), applies the
+        three-layer fallback: frontmatter title → clean_slug → stem.
+        For regular notes, returns the filename stem unchanged.
+        """
+        if self.frontmatter.get("knowledge_id"):
+            from prism_rag.ingest.label_resolver import resolve_knowledge_label
+            return resolve_knowledge_label(self.frontmatter, self.path.stem)
         return self.path.stem
 
     @property

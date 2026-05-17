@@ -255,3 +255,50 @@ def test_resolve_knowledge_label_fallback_stem():
         "KNOW-000001",  # only two hyphen-segments, no slug
     )
     assert label == "KNOW-000001"
+
+
+# ===========================================================================
+# P4 — VaultDocument.label via vault_loader (previously missing coverage)
+# ===========================================================================
+
+def test_vault_document_label_knowledge_with_title(tmp_path):
+    """VaultDocument.label for knowledge node with frontmatter title uses title."""
+    from prism_rag.ingest.vault_loader import VaultDocument
+
+    know_file = tmp_path / "knowledge" / "KNOW-000099.md"
+    know_file.parent.mkdir(parents=True)
+    know_file.write_text(
+        "---\nknowledge_id: KNOW-000099\ntitle: 状态机核心概念\nontology_type: concept\n---\n内容",
+        encoding="utf-8",
+    )
+    doc = VaultDocument.from_path(know_file, tmp_path)
+    assert doc.label == "状态机核心概念"
+
+
+def test_vault_document_label_knowledge_clean_slug(tmp_path):
+    """VaultDocument.label for knowledge node without title uses clean_slug."""
+    from prism_rag.ingest.vault_loader import VaultDocument
+
+    know_file = tmp_path / "knowledge" / "KNOW-000098-langgraph-node-edge.md"
+    know_file.parent.mkdir(parents=True)
+    know_file.write_text(
+        "---\nknowledge_id: KNOW-000098\nontology_type: concept\n---\n内容",
+        encoding="utf-8",
+    )
+    doc = VaultDocument.from_path(know_file, tmp_path)
+    assert doc.label == "langgraph node edge"
+
+
+def test_vault_document_label_regular_note_unchanged(tmp_path):
+    """VaultDocument.label for regular (non-knowledge) note returns stem unchanged."""
+    from prism_rag.ingest.vault_loader import VaultDocument
+
+    note_file = tmp_path / "设计细节" / "PrismRag v5.4 — Atomize 体验精打磨.md"
+    note_file.parent.mkdir(parents=True)
+    note_file.write_text(
+        "---\ntitle: Some Title\n---\n内容",
+        encoding="utf-8",
+    )
+    doc = VaultDocument.from_path(note_file, tmp_path)
+    # Regular notes (no knowledge_id) should return stem, not frontmatter title
+    assert doc.label == "PrismRag v5.4 — Atomize 体验精打磨"
