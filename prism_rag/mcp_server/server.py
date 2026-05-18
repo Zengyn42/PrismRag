@@ -1066,17 +1066,64 @@ def atomize_scan(doc_path: str) -> str:
 @mcp.tool()
 def atomize_propose(scan_id: str, claims: list[dict]) -> str:
     """Submit semantic claims for a scanned document to create an atomization proposal.
+
     Returns JSON with proposal_id and claim summaries.
     Each claim must have: section_id (from atomize_scan), knowledge_id (from alloc_knowledge_id),
     title, body, ontology_type. Raises error if scan_id is expired or not found.
+
+    Semantic deduplication: when the embedding store is available, each claim body is
+    compared against existing KNOW nodes. Claims similar to an existing node get
+    ``similar_existing`` (list of {id, score, title}) and ``claim_status='needs_review'``.
+    To reuse an existing node instead of creating a new one, set ``action='reuse'`` and
+    ``reuse_id='KNOW-XXXXXX'`` on that claim before calling atomize_apply().
+
     See atomize_apply() for the next step.
     """
     from prism_rag.ingest.atomize import atomize_propose_impl, ScanExpiredError
     settings = PrismRagSettings()
     scan_dir = settings.data_dir / "atomize-proposals" / "scan_cache"
     proposal_dir = settings.data_dir / "atomize-proposals" / "pending"
+
+    # Collect dedup context from live graph state (best-effort, skip if unavailable).
+    _emb_store = None
+    _embedder_ref = None
+    _know_ids: set[str] | None = None
+    _know_labels: dict[str, str] | None = None
     try:
-        result = atomize_propose_impl(scan_id=scan_id, claims=claims, scan_dir=scan_dir, proposal_dir=proposal_dir)
+        fg = _federated  # noqa: F821 — module-level global
+        if fg is not None and _embedding_stores:  # noqa: F821
+            first_ns = fg.namespaces[0] if fg.namespaces else None
+            if first_ns and first_ns in _embedding_stores:  # noqa: F821
+                _emb_store = _embedding_stores[first_ns]  # noqa: F821
+            if _embedder is not None:  # noqa: F821
+                _embedder_ref = _embedder  # noqa: F821
+            # Build knowledge_node_ids + labels from the federated graph.
+            _know_ids = set()
+            _know_labels = {}
+            for ns in fg.namespaces:
+                g = fg.get_graph(ns)
+                if g is None:
+                    continue
+                for nid, data in g.g.nodes(data=True):
+                    if data.get("kind") == "knowledge":
+                        _know_ids.add(nid)
+                        _know_labels[nid] = data.get("label", nid)
+    except Exception as _exc:
+        logger.debug(f"[atomize_propose] dedup context unavailable: {_exc}")
+
+    try:
+        result = atomize_propose_impl(
+            scan_id=scan_id,
+            claims=claims,
+            scan_dir=scan_dir,
+            proposal_dir=proposal_dir,
+            embedding_store=_emb_store,
+            embedder=_embedder_ref,
+            knowledge_node_ids=_know_ids,
+            knowledge_node_labels=_know_labels,
+            dedup_threshold=settings.dedup.threshold,
+            min_nodes_for_dedup=settings.dedup.min_nodes_for_calibration,
+        )
         return json.dumps(result, ensure_ascii=False)
     except ScanExpiredError as e:
         return json.dumps({"error": str(e), "error_type": "ScanExpiredError"}, ensure_ascii=False)
@@ -1087,9 +1134,15 @@ def atomize_propose(scan_id: str, claims: list[dict]) -> str:
 @mcp.tool()
 def atomize_apply(proposal_id: str) -> str:
     """Apply an atomization proposal: create knowledge/*.md files and patch source document.
-    Returns JSON with applied_count and list of created knowledge file paths.
+
+    Returns JSON with applied_count, reused_count, knowledge_files, and reused_nodes.
     Raises error if source document has changed since atomize_propose was called (StaleDocError).
     Idempotent: already-applied KNOW-IDs are skipped safely (crash recovery).
+
+    Reuse support: claims with ``action='reuse'`` and ``reuse_id='KNOW-XXXXXX'`` do NOT
+    create a new knowledge file. Instead a MENTIONS edge is added from the source document
+    to the existing node, and a DedupSnapshot is written to dedup_log.jsonl for auditability.
+
     See atomize_propose() for the previous step.
     """
     from prism_rag.ingest.atomize import atomize_apply_impl, StaleDocError
@@ -1097,14 +1150,17 @@ def atomize_apply(proposal_id: str) -> str:
     pending_dir = settings.data_dir / "atomize-proposals" / "pending"
     applied_dir = settings.data_dir / "atomize-proposals" / "applied"
     resolved = settings.resolved_graphs
-    vault_root = resolved[0].vault_path if resolved else settings.vault_path
+    nimbus_src = next((s for s in resolved if s.namespace == "nimbus"), resolved[0] if resolved else None)
+    vault_root = nimbus_src.vault_path if nimbus_src else settings.vault_path
+    dedup_log_path = (nimbus_src.data_dir / "dedup_log.jsonl") if nimbus_src else None
     try:
         result = atomize_apply_impl(
             proposal_id=proposal_id,
             vault_root=vault_root,
             pending_dir=pending_dir,
             applied_dir=applied_dir,
-            graph_path=settings.resolved_graphs[0].data_dir / "graph.json",
+            graph_path=(nimbus_src.data_dir / "graph.json") if nimbus_src else None,
+            dedup_log_path=dedup_log_path,
         )
         global _federated
         _federated = None  # Force full reload so new KNOW nodes are visible immediately

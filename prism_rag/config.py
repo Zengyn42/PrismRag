@@ -21,6 +21,29 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class DedupConfig(BaseModel):
+    """Semantic deduplication settings for atomize_propose."""
+
+    threshold: float = Field(
+        default=0.90,
+        ge=0.0,
+        le=1.0,
+        description="Cosine similarity threshold to flag a claim as potentially duplicate "
+                    "(0.90 = 90% similar to an existing KNOW node triggers review).",
+    )
+    calibrated_model: str = Field(
+        default="",
+        description="Embedding model used during threshold calibration (informational only). "
+                    "Empty string means using the default from PrismRagSettings.ollama_model.",
+    )
+    min_nodes_for_calibration: int = Field(
+        default=100,
+        ge=1,
+        description="Minimum number of KNOW nodes required before dedup is activated "
+                    "(cold-start protection — skips dedup when the graph is too small).",
+    )
+
+
 PrivacyTier = Literal["paid", "free"]
 EmbedBackend = Literal["ollama", "gemini"]
 
@@ -202,6 +225,13 @@ class PrismRagSettings(BaseSettings):
     multi_graph_mode: str = Field(
         default="federated",
         description="Federation strategy. Only 'federated' is implemented.",
+    )
+
+    # ── Semantic deduplication (atomize_propose) ─────────────────────
+    dedup: DedupConfig = Field(
+        default_factory=DedupConfig,
+        description="Dedup config for atomize_propose semantic similarity check. "
+                    "Set via PRISM_DEDUP='{\"threshold\": 0.85}' (JSON) or .env.",
     )
 
     # ── EdgeClassifier per-model thresholds ──────────────────────────

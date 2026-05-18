@@ -753,6 +753,22 @@ def embed_status() -> None:
         )
 
 
+@app.command()
+def calibrate() -> None:
+    """Calibrate dedup threshold by sampling node pairs (interactive annotation).
+
+    NOT YET IMPLEMENTED. Falls back gracefully to the threshold set in config
+    (default 0.90, override via PRISM_DEDUP='{"threshold": 0.85}').
+    """
+    typer.echo("prism calibrate: not yet implemented. Using fallback threshold from config.")
+    settings = PrismRagSettings()
+    typer.echo(
+        f"  current threshold: {settings.dedup.threshold}  "
+        f"min_nodes_for_calibration: {settings.dedup.min_nodes_for_calibration}"
+    )
+    raise typer.Exit(0)
+
+
 # ── Atomize sub-application ─────────────────────────────────────────────────
 
 app.add_typer(atomize_app, name="atomize")

@@ -160,6 +160,13 @@ def atomize_propose_impl(
     claims: list[dict[str, Any]],
     scan_dir: Path,
     proposal_dir: Path,
+    *,
+    embedding_store: Any = None,
+    embedder: Any = None,
+    knowledge_node_ids: "set[str] | None" = None,
+    knowledge_node_labels: "dict[str, str] | None" = None,
+    dedup_threshold: float = 0.90,
+    min_nodes_for_dedup: int = 100,
 ) -> dict[str, Any]:
     """Phase 2: validate claims against scan cache, write proposal file.
 
@@ -168,6 +175,18 @@ def atomize_propose_impl(
         claims: list of claim dicts with keys: section_id, knowledge_id, title, body, ontology_type
         scan_dir: where scan cache lives
         proposal_dir: where to write pending proposals
+        embedding_store: optional EmbeddingStore for ANN similarity search.
+            When provided (and embedder is not None), claims are batch-embedded
+            and compared against existing KNOW nodes. Claims with a similar existing
+            node get ``similar_existing`` and ``claim_status='needs_review'`` set.
+        embedder: optional OllamaEmbedder (or compatible) for embedding claim bodies.
+        knowledge_node_ids: pre-computed set of node IDs with kind='knowledge' for
+            post-filtering ANN results. Callers should extract this from the graph.
+            When None, all ANN results are used (may include non-knowledge nodes).
+        knowledge_node_labels: node_id → label lookup for populating similar_existing.
+        dedup_threshold: cosine similarity above which a claim is flagged (0.90 default).
+        min_nodes_for_dedup: skip dedup if embedding_store has fewer nodes than this
+            (cold-start protection).
 
     Returns:
         dict with proposal_id and claim summary
@@ -212,6 +231,56 @@ def atomize_propose_impl(
             "claim_status": "pending",
         })
 
+    # ── Semantic deduplication (optional) ────────────────────────────────────
+    # Requires both embedding_store and embedder; skips gracefully if either is absent.
+    # Cold-start protection: skip if fewer than min_nodes_for_dedup nodes are indexed.
+    _dedup_active = (
+        embedding_store is not None
+        and embedder is not None
+        and embedding_store.count() >= min_nodes_for_dedup
+        and len(validated_claims) > 0
+    )
+    if _dedup_active:
+        logger.info(
+            f"[atomize/propose] running semantic dedup on {len(validated_claims)} claim(s) "
+            f"(threshold={dedup_threshold})"
+        )
+        try:
+            claim_bodies = [c["body"] for c in validated_claims]
+            vectors: list[list[float]] = embedder.embed_batch(claim_bodies)
+            for claim, vec in zip(validated_claims, vectors):
+                # ANN search returns (node_id, distance); convert distance → similarity.
+                raw_hits = embedding_store.search(vec, top_k=5)
+                similar_existing: list[dict[str, Any]] = []
+                for node_id, distance in raw_hits:
+                    similarity = max(0.0, 1.0 - float(distance))
+                    if similarity < dedup_threshold:
+                        continue
+                    # Post-filter: only knowledge nodes.
+                    if knowledge_node_ids is not None and node_id not in knowledge_node_ids:
+                        continue
+                    # Skip self-match (same knowledge_id being reproposed).
+                    if node_id == claim.get("knowledge_id"):
+                        continue
+                    label = (knowledge_node_labels or {}).get(node_id, node_id)
+                    similar_existing.append({
+                        "id": node_id,
+                        "score": round(similarity, 4),
+                        "title": label,
+                    })
+                if similar_existing:
+                    claim["similar_existing"] = similar_existing
+                    claim["claim_status"] = "needs_review"
+                    logger.debug(
+                        f"[atomize/propose] claim {claim['knowledge_id']!r} flagged "
+                        f"({len(similar_existing)} similar node(s))"
+                    )
+                else:
+                    claim["similar_existing"] = []
+        except Exception as exc:
+            logger.warning(f"[atomize/propose] dedup pass failed (skipped): {exc}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     proposal_id = str(uuid.uuid4())
     proposal_dir = Path(proposal_dir)
     proposal_dir.mkdir(parents=True, exist_ok=True)
@@ -229,15 +298,24 @@ def atomize_propose_impl(
         json.dumps(proposal, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
+    claim_summary = []
+    for c in validated_claims:
+        entry: dict[str, Any] = {
+            "knowledge_id": c["knowledge_id"],
+            "title": c["title"],
+            "claim_status": c["claim_status"],
+        }
+        if c.get("similar_existing"):
+            entry["similar_existing"] = c["similar_existing"]
+        claim_summary.append(entry)
+
     return {
         "proposal_id": proposal_id,
         "doc_path": cached["doc_path"],
         "doc_sha": cached["doc_sha"],
         "claim_count": len(validated_claims),
-        "claims": [
-            {"knowledge_id": c["knowledge_id"], "title": c["title"], "claim_status": c["claim_status"]}
-            for c in validated_claims
-        ],
+        "dedup_active": _dedup_active,
+        "claims": claim_summary,
     }
 
 
@@ -314,6 +392,7 @@ def atomize_apply_impl(
     pending_dir: Path,
     applied_dir: Path,
     graph_path: Path | None = None,
+    dedup_log_path: Path | None = None,
 ) -> dict[str, Any]:
     """Phase 3: create knowledge files, patch source doc, move proposal to applied.
 
@@ -329,6 +408,9 @@ def atomize_apply_impl(
         graph_path: Optional path to graph.json; if provided, each new knowledge
                     file is incrementally ingested into the graph immediately after
                     creation (skip_embed=True, skip_leiden=True for speed).
+        dedup_log_path: Optional path to dedup_log.jsonl. When provided, each
+                        'reuse' claim writes a DedupSnapshot for auditability and
+                        rollback support.
     """
     pending_dir = Path(pending_dir)
     applied_dir = Path(applied_dir)
@@ -373,9 +455,23 @@ def atomize_apply_impl(
 
     # Apply claims: write knowledge files, track all KNOW-IDs (existing + new)
     all_kids: list[str] = list(existing_atomized)
+    reuse_claims: list[dict[str, Any]] = []  # collected for graph-level ops below
 
     for claim in proposal["claims"]:
         kid = claim["knowledge_id"]
+
+        # ── Reuse path: existing node referenced, no new file needed ──────────
+        if claim.get("action") == "reuse":
+            reuse_id = claim.get("reuse_id", "")
+            if not reuse_id:
+                logger.warning(f"[atomize/apply] claim {kid!r} has action='reuse' but missing reuse_id; treating as create")
+            else:
+                claim["claim_status"] = "reused"
+                reuse_claims.append(claim)
+                logger.info(f"[atomize/apply] claim {kid!r} → reuse {reuse_id!r}")
+                continue
+        # ─────────────────────────────────────────────────────────────────────
+
         if kid in existing_atomized:
             # Already applied in a previous run — mark status and skip file write
             claim["claim_status"] = "applied"
@@ -399,6 +495,28 @@ def atomize_apply_impl(
     # Patch source doc atomized_nodes (idempotent — overwrites with full list)
     _patch_source_doc_atomized_nodes(doc_path, all_kids)
 
+    # ── Write dedup snapshots for reuse decisions ─────────────────────────────
+    if reuse_claims and dedup_log_path is not None:
+        from datetime import timezone as _tz
+        from prism_rag.ingest.dedup_log import DedupSnapshot, write_snapshot
+        now_iso = datetime.now(_tz.utc).isoformat()
+        for rc in reuse_claims:
+            snap = DedupSnapshot(
+                decision_id=str(uuid.uuid4()),
+                timestamp=now_iso,
+                action="reuse",
+                claim_title=rc.get("title", rc.get("knowledge_id", "")),
+                reused_id=rc.get("reuse_id"),
+                source_doc=atomized_from,
+                similarity_score=float(rc.get("similarity_score", 0.90)),
+                pre_state={"mentions_edges": []},
+            )
+            try:
+                write_snapshot(dedup_log_path, snap)
+            except Exception as exc:
+                logger.warning(f"[atomize/apply] failed to write dedup snapshot: {exc}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Incremental graph update for each new knowledge file
     if graph_path is not None:
         from prism_rag.config import PrismRagSettings
@@ -421,8 +539,9 @@ def atomize_apply_impl(
                     logger.warning(f"[atomize/apply] incremental ingest failed for {kid}: {exc}")
 
         # Embed new KNOW nodes in one batch, relink similarity edges, recluster.
+        # Also handles reuse claims: MENTIONS edges + CONTEXT_REF nodes.
         try:
-            from prism_rag.store.graph import KnowledgeGraph, Node
+            from prism_rag.store.graph import KnowledgeGraph, Node, Edge
             from prism_rag.store.embedding_store import EmbeddingStore
             from prism_rag.ingest.embedder import compute_embeddings
             from prism_rag.ingest.similarity_linker import link_similar_nodes
@@ -431,6 +550,43 @@ def atomize_apply_impl(
 
             graph = KnowledgeGraph.load(_ingest_settings.graph_path)
             store = EmbeddingStore(_ingest_settings.embedding_cache_path, dim=_ingest_settings.embedding_dim)
+
+            # ── Reuse claims: add MENTIONS edges + optional CONTEXT_REF nodes ──
+            for rc in reuse_claims:
+                reuse_id = rc.get("reuse_id", "")
+                if not reuse_id:
+                    continue
+                if not graph.g.has_node(reuse_id):
+                    logger.warning(
+                        f"[atomize/apply] reuse target {reuse_id!r} not in graph — "
+                        "MENTIONS edge not created (node may not be ingested yet)"
+                    )
+                    continue
+                # MENTIONS edge: source_doc → reused KNOW node.
+                graph.add_edge(Edge(
+                    source=atomized_from,
+                    target=reuse_id,
+                    relation="mentions",
+                    confidence="INFERRED",
+                    confidence_score=float(rc.get("similarity_score", 0.90)),
+                    source_pass="dedup",
+                ))
+                logger.info(
+                    f"[atomize/apply] added MENTIONS edge {atomized_from!r} → {reuse_id!r}"
+                )
+                # Optional CONTEXT_REF node for additional context annotation.
+                context_note = rc.get("context_note", "")
+                if context_note:
+                    ctx_id = f"CONTEXT_REF_{reuse_id}_{uuid.uuid4().hex[:8]}"
+                    graph.add_node(Node(
+                        id=ctx_id,
+                        label=f"Context: {rc.get('title', reuse_id)}",
+                        kind="context_ref",
+                        source_file=atomized_from,
+                        content=context_note,
+                    ))
+                    logger.info(f"[atomize/apply] added CONTEXT_REF node {ctx_id!r}")
+            # ────────────────────────────────────────────────────────────────────
 
             new_kids = [c["knowledge_id"] for c in proposal["claims"] if c.get("claim_status") == "applied"]
             temp_graph = KnowledgeGraph()
@@ -473,9 +629,19 @@ def atomize_apply_impl(
     proposal_file.rename(applied_dir / f"{proposal_id}.json")
 
     applied_count = len([c for c in proposal["claims"] if c.get("claim_status") == "applied"])
+    reused_count = len([c for c in proposal["claims"] if c.get("claim_status") == "reused"])
     return {
         "proposal_id": proposal_id,
         "applied_count": applied_count,
-        "knowledge_files": [f"knowledge/{c['knowledge_id']}.md" for c in proposal["claims"]],
+        "reused_count": reused_count,
+        "knowledge_files": [
+            f"knowledge/{c['knowledge_id']}.md"
+            for c in proposal["claims"]
+            if c.get("claim_status") == "applied"
+        ],
+        "reused_nodes": [
+            c.get("reuse_id") for c in proposal["claims"]
+            if c.get("claim_status") == "reused"
+        ],
         "doc_patched": doc_path_str,
     }

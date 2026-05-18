@@ -150,15 +150,21 @@ def test_explain_node_knowid_case_insensitive(tmp_path):
     assert "node" in result
 
 
-def test_explain_node_mixed_input_error(tmp_path):
-    """explain_node with dirty input returns smart error pointing to clean ID."""
+def test_explain_node_mixed_input_auto_resolves(tmp_path):
+    """explain_node auto-extracts an embedded KNOW-ID and resolves it directly.
+
+    Since ae766c9, explain_node no longer returns a smart error for dirty IDs —
+    it auto-extracts the KNOW-ID and retries the lookup, returning the node if found.
+    This avoids the error→retry loop while being transparent to the caller.
+    """
     fg = _make_fake_federated(tmp_path)
     mcp_server._federated = fg
     result = json.loads(mcp_server.explain_node("KNOW-000008 的架构"))
-    assert "error" in result
-    # Error must contain the clean ID call to break ping-pong loops
-    assert "explain_node(node='KNOW-000008')" in result["error"]
-    assert "额外文本" in result["error"] or "额外" in result["error"]
+    # Must resolve to the node, NOT return an error
+    assert "error" not in result, f"Expected node, got error: {result.get('error')}"
+    assert "node" in result
+    # The resolved node must be KNOW-000008 (correct auto-extraction)
+    assert result["node"]["id"] == "KNOW-000008"
 
 
 # ===========================================================================
