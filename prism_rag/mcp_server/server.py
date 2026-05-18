@@ -324,23 +324,24 @@ def explain_node(node: str, scope: str = "") -> str:
     fg = _ensure_federated()
     entries = resolve_entry_points(fg, node, scope=scope or None)
     if not entries:
-        # P2: smart error — distinguish "dirty ID" from "pure natural language"
-        # to prevent search→explain→search ping-pong loops.
+        # P2: if KNOW-ID is embedded in a longer string, auto-extract and retry.
+        # This prevents the explain→error→retry→error dead loop when the LLM
+        # passes extra context alongside the ID (e.g. "KNOW-000032 的内容是什么？").
         _embedded = _re.search(r'KNOW-(\d{6,})', node, _re.IGNORECASE)
         if _embedded:
-            clean_id = f"KNOW-{_embedded.group(1)}"
+            clean_id = f"KNOW-{_embedded.group(1).upper()}"
+            entries = resolve_entry_points(fg, clean_id, scope=scope or None)
+            if not entries:
+                return json.dumps({
+                    "error": f"节点 {clean_id} 不存在于图中。请确认 ID 正确，或使用 search_knowledge 进行语义搜索。"
+                }, ensure_ascii=False)
+        else:
             return json.dumps({
                 "error": (
-                    f"输入包含额外文本，无法精确匹配节点。"
-                    f"请仅传入纯 ID 重新调用：explain_node(node='{clean_id}')"
+                    f"未找到精确匹配的节点：{node!r}。"
+                    "若需语义搜索请使用 search_knowledge。"
                 )
             }, ensure_ascii=False)
-        return json.dumps({
-            "error": (
-                f"未找到精确匹配的节点：{node!r}。"
-                "若需语义搜索请使用 search_knowledge。"
-            )
-        }, ensure_ascii=False)
 
     ns, node_id = entries[0]
     graph = fg.get_graph(ns)
@@ -1022,7 +1023,10 @@ def list_knowledge_nodes(
                 results.append({
                     "id": node_id,
                     "label": data.get("label", node_id),
-                    "knowledge_id": data.get("knowledge_id"),
+                    "knowledge_id": (
+                        data.get("knowledge_id")
+                        or data.get("frontmatter", {}).get("knowledge_id")
+                    ),
                     "namespace": ns,
                     "tokens": data.get("tokens", 0),
                     "body_preview": data.get("content", "")[:50],
