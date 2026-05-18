@@ -313,20 +313,25 @@ def _compute_embeddings_ollama(
     if device == "cpu":
         logger.warning(
             f"[embedder/ollama] model={model} is running on CPU. "
-            "Embedding will be very slow. Wait for GPU to be free and retry."
+            "Using CPU-safe timeout (300s) and batch_size=1."
         )
-    elif device == "unknown":
-        logger.info(f"[embedder/ollama] could not detect device for model={model}")
+        effective_timeout = 300
+        effective_batch_size = 1
+    else:
+        if device == "unknown":
+            logger.info(f"[embedder/ollama] could not detect device for model={model}")
+        effective_timeout = _OLLAMA_TIMEOUT
+        effective_batch_size = _OLLAMA_BATCH_SIZE
 
-    embedder = OllamaEmbedder(model=model, base_url=host, timeout=_OLLAMA_TIMEOUT)
+    embedder = OllamaEmbedder(model=model, base_url=host, timeout=effective_timeout)
     total = len(pending)
     logger.info(
         f"[embedder/ollama] computing {total} embeddings "
-        f"(model={embedder.model}, batch={_OLLAMA_BATCH_SIZE}, cache_hits={len(vectors)})"
+        f"(model={embedder.model}, batch={effective_batch_size}, cache_hits={len(vectors)})"
     )
 
-    for batch_start in range(0, total, _OLLAMA_BATCH_SIZE):
-        batch = pending[batch_start: batch_start + _OLLAMA_BATCH_SIZE]
+    for batch_start in range(0, total, effective_batch_size):
+        batch = pending[batch_start: batch_start + effective_batch_size]
         node_ids = [nid for nid, _ in batch]
         texts = [_truncate(content) for _, content in batch]
         try:

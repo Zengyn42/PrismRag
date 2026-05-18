@@ -62,3 +62,13 @@ logs/
 
 lib/
 .gitnexus
+
+# pip install artifacts (accidental =0.xx files)
+=*
+
+# Tool config dirs
+.claude/
+.gemini/
+
+# Local env config
+.prism_env
