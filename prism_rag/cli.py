@@ -769,6 +769,81 @@ def calibrate() -> None:
     raise typer.Exit(0)
 
 
+@app.command()
+def visualize(
+    namespace: str = typer.Option("", "--namespace", "-n", help="Namespace to visualize (default: first namespace)"),
+    federation: bool = typer.Option(False, "--federation", "-f", help="Generate federation meta-graph instead"),
+    output: Path = typer.Option(None, "--output", "-o", help="Output HTML path (default: data_dir/graph.html or data_dir/federation.html)"),
+    vault: str = typer.Option("", "--vault", "-v", help="Obsidian vault name for deep-link URIs"),
+) -> None:
+    """Generate an interactive HTML knowledge graph visualization.
+
+    Produces a graph.html (or federation.html) in the data directory.
+    Use --federation to generate a meta-graph showing all namespaces.
+    Use --vault to enable Obsidian deep-link click-to-open on note nodes.
+
+    Examples:
+        prism visualize
+        prism visualize --namespace nimbus --vault NimbusVault
+        prism visualize --federation
+    """
+    from prism_rag.config import PrismRagSettings
+    from prism_rag.store.graph import KnowledgeGraph
+
+    settings = PrismRagSettings()
+    resolved = settings.resolved_graphs
+
+    if not resolved:
+        typer.secho("No graphs configured.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    vault_name = vault or None
+
+    if federation:
+        # ── Federation meta-graph ─────────────────────────────────────
+        try:
+            from prism_rag.report.federation_map import generate_federation_html
+            from prism_rag.store.federated import FederatedGraph
+        except ImportError as exc:
+            typer.secho(f"Visualization unavailable: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+
+        fg = FederatedGraph.load(resolved)
+        out = output or (settings.data_dir / "federation.html")
+        generate_federation_html(fg, out)
+        typer.secho(f"✅ Federation graph → {out}", fg=typer.colors.GREEN)
+        return
+
+    # ── Single-namespace graph ────────────────────────────────────────
+    try:
+        from prism_rag.report.visualize import generate_html
+    except ImportError as exc:
+        typer.secho(
+            f"Visualization unavailable (install pyvis: pip install prism-rag[viz]): {exc}",
+            fg=typer.colors.YELLOW, err=True,
+        )
+        raise typer.Exit(1)
+
+    # Select namespace
+    if namespace:
+        src = next((s for s in resolved if s.namespace == namespace), None)
+        if src is None:
+            typer.secho(f"Namespace {namespace!r} not found. Available: {[s.namespace for s in resolved]}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+    else:
+        src = resolved[0]
+
+    graph_path = src.data_dir / "graph.json"
+    if not graph_path.exists():
+        typer.secho(f"Graph not found at {graph_path}. Run 'prism ingest' first.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    graph = KnowledgeGraph.load(graph_path)
+    out = output or (src.data_dir / "graph.html")
+    generate_html(graph, out, vault_name=vault_name)
+    typer.secho(f"✅ Graph visualization → {out}", fg=typer.colors.GREEN)
+
+
 # ── Atomize sub-application ─────────────────────────────────────────────────
 
 app.add_typer(atomize_app, name="atomize")

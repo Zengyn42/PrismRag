@@ -1037,6 +1037,82 @@ def list_knowledge_nodes(
     return json.dumps({"nodes": results, "total": total, "returned": len(results)}, ensure_ascii=False)
 
 
+# -- Tool: generate_graph ------------------------------------------------------
+
+
+@mcp.tool()
+def generate_graph(namespace: str = "", federation: bool = False) -> str:
+    """Generate an interactive HTML knowledge graph visualization.
+
+    Produces a graph.html (or federation.html) in the data directory and
+    returns the output file path(s) as JSON.
+
+    Args:
+        namespace: Namespace to visualize. Leave empty for the first/only namespace.
+        federation: When True, generates a federation meta-graph showing all
+            namespaces as boxes with cross-namespace edge counts. Clicking a box
+            opens that namespace's graph.html.
+
+    Returns:
+        JSON with "paths" list of generated HTML file path(s).
+    """
+    settings = PrismRagSettings()
+    resolved = settings.resolved_graphs
+    if not resolved:
+        return json.dumps({"error": "No graphs configured"}, ensure_ascii=False)
+
+    generated: list[str] = []
+
+    if federation:
+        try:
+            from prism_rag.report.federation_map import generate_federation_html
+            from prism_rag.store.federated import FederatedGraph
+            fg = FederatedGraph.load(resolved)
+            out = settings.data_dir / "federation.html"
+            generate_federation_html(fg, out)
+            generated.append(str(out))
+        except Exception as exc:
+            logger.warning(f"[generate_graph] federation map failed: {exc}")
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    else:
+        try:
+            from prism_rag.report.visualize import generate_html
+            from prism_rag.store.graph import KnowledgeGraph
+            # Select namespace
+            if namespace:
+                src = next((s for s in resolved if s.namespace == namespace), None)
+                if src is None:
+                    return json.dumps(
+                        {"error": f"Namespace {namespace!r} not found",
+                         "available": [s.namespace for s in resolved]},
+                        ensure_ascii=False,
+                    )
+            else:
+                src = resolved[0]
+            graph_path = src.data_dir / "graph.json"
+            if not graph_path.exists():
+                return json.dumps(
+                    {"error": f"graph.json not found at {graph_path}. Run prism ingest first."},
+                    ensure_ascii=False,
+                )
+            graph = KnowledgeGraph.load(graph_path)
+            out = src.data_dir / "graph.html"
+            # Use vault_name from first vault source (Obsidian deep-links)
+            vault_name = src.vault_path.name if src.vault_path else None
+            generate_html(graph, out, vault_name=vault_name)
+            generated.append(str(out))
+        except ImportError:
+            return json.dumps(
+                {"error": "pyvis not installed. Run: pip install prism-rag[viz]"},
+                ensure_ascii=False,
+            )
+        except Exception as exc:
+            logger.warning(f"[generate_graph] visualization failed: {exc}")
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    return json.dumps({"paths": generated}, ensure_ascii=False)
+
+
 # -- Tool: atomize_scan --------------------------------------------------------
 
 @mcp.tool()
