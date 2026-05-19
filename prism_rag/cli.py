@@ -52,7 +52,7 @@ def _resolve_settings(vault: Path | None, output: Path | None) -> PrismRagSettin
 def ingest(
     vault: Path = typer.Option(None, "--vault", "-v", help="Vault path"),
     output: Path = typer.Option(None, "--output", "-o", help="Output dir"),
-    namespace: str = typer.Option("", "--namespace", "-n", help="Namespace for this vault's graph (for multi-graph federation)"),
+    namespace: str = typer.Option("", "--namespace", "-n", help="Namespace for this vault's graph"),
     skip_cluster: bool = typer.Option(False, "--skip-cluster"),
     skip_report: bool = typer.Option(False, "--skip-report"),
     skip_embed: bool = typer.Option(False, "--skip-embed", help="Skip Pass 3 embedding + similarity edges"),
@@ -772,20 +772,17 @@ def calibrate() -> None:
 @app.command()
 def visualize(
     namespace: str = typer.Option("", "--namespace", "-n", help="Namespace to visualize (default: first namespace)"),
-    federation: bool = typer.Option(False, "--federation", "-f", help="Generate federation meta-graph instead"),
-    output: Path = typer.Option(None, "--output", "-o", help="Output HTML path (default: data_dir/graph.html or data_dir/federation.html)"),
+    output: Path = typer.Option(None, "--output", "-o", help="Output HTML path (default: data_dir/graph.html)"),
     vault: str = typer.Option("", "--vault", "-v", help="Obsidian vault name for deep-link URIs"),
 ) -> None:
     """Generate an interactive HTML knowledge graph visualization.
 
-    Produces a graph.html (or federation.html) in the data directory.
-    Use --federation to generate a meta-graph showing all namespaces.
+    Produces a graph.html in the data directory.
     Use --vault to enable Obsidian deep-link click-to-open on note nodes.
 
     Examples:
         prism visualize
         prism visualize --namespace nimbus --vault NimbusVault
-        prism visualize --federation
     """
     from prism_rag.config import PrismRagSettings
     from prism_rag.store.graph import KnowledgeGraph
@@ -798,21 +795,6 @@ def visualize(
         raise typer.Exit(1)
 
     vault_name = vault or None
-
-    if federation:
-        # ── Federation meta-graph ─────────────────────────────────────
-        try:
-            from prism_rag.report.federation_map import generate_federation_html
-            from prism_rag.store.federated import FederatedGraph
-        except ImportError as exc:
-            typer.secho(f"Visualization unavailable: {exc}", fg=typer.colors.RED, err=True)
-            raise typer.Exit(1)
-
-        fg = FederatedGraph.load(resolved)
-        out = output or (settings.data_dir / "federation.html")
-        generate_federation_html(fg, out)
-        typer.secho(f"✅ Federation graph → {out}", fg=typer.colors.GREEN)
-        return
 
     # ── Single-namespace graph ────────────────────────────────────────
     try:
