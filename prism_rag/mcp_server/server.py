@@ -1092,9 +1092,10 @@ def atomize_propose(scan_id: str, claims: list[dict]) -> str:
     try:
         fg = _federated  # noqa: F821 — module-level global
         if fg is not None and _embedding_stores:  # noqa: F821
-            first_ns = fg.namespaces[0] if fg.namespaces else None
-            if first_ns and first_ns in _embedding_stores:  # noqa: F821
-                _emb_store = _embedding_stores[first_ns]  # noqa: F821
+            # Atomize is vault (nimbus) scoped — use nimbus store for dedup.
+            # Fall back to first available store if nimbus isn't indexed.
+            _nimbus_store = _embedding_stores.get("nimbus")  # noqa: F821
+            _emb_store = _nimbus_store or next(iter(_embedding_stores.values()), None)  # noqa: F821
             if _embedder is not None:  # noqa: F821
                 _embedder_ref = _embedder  # noqa: F821
             # Build knowledge_node_ids + labels from the federated graph.

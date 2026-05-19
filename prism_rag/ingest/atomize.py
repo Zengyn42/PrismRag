@@ -221,7 +221,7 @@ def atomize_propose_impl(
         seen_kids.add(kid)
         sid = str(claim.get("section_id", ""))
         snapshot = snapshot_map.get(sid, "")
-        validated_claims.append({
+        entry: dict[str, Any] = {
             "section_id": sid,
             "knowledge_id": kid,
             "title": claim.get("title", ""),
@@ -229,15 +229,27 @@ def atomize_propose_impl(
             "ontology_type": claim.get("ontology_type", "concept"),
             "content_snapshot": snapshot,
             "claim_status": "pending",
-        })
+        }
+        # Preserve reuse decision fields if caller pre-set them
+        if claim.get("action"):
+            entry["action"] = claim["action"]
+        if claim.get("reuse_id"):
+            entry["reuse_id"] = claim["reuse_id"]
+        if claim.get("similarity_score"):
+            entry["similarity_score"] = claim["similarity_score"]
+        if claim.get("context_note"):
+            entry["context_note"] = claim["context_note"]
+        validated_claims.append(entry)
 
     # ── Semantic deduplication (optional) ────────────────────────────────────
     # Requires both embedding_store and embedder; skips gracefully if either is absent.
-    # Cold-start protection: skip if fewer than min_nodes_for_dedup nodes are indexed.
+    # Cold-start protection: skip if there are no existing KNOW nodes to compare against.
+    # Note: min_nodes_for_dedup guards prism-calibrate (dynamic threshold tuning), NOT dedup
+    # itself — dedup fires whenever at least one KNOW node exists in the graph.
     _dedup_active = (
         embedding_store is not None
         and embedder is not None
-        and embedding_store.count() >= min_nodes_for_dedup
+        and bool(knowledge_node_ids)  # at least one KNOW node to compare against
         and len(validated_claims) > 0
     )
     if _dedup_active:
