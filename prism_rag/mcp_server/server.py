@@ -1172,6 +1172,71 @@ def atomize_apply(proposal_id: str) -> str:
         return json.dumps({"error": str(e), "error_type": "NotFound"}, ensure_ascii=False)
 
 
+# -- Tool: rollback_dedup ----------------------------------------------------
+
+@mcp.tool()
+def rollback_dedup(decision_id: str) -> str:
+    """Undo the graph effects of a 'reuse' dedup decision recorded in dedup_log.jsonl.
+
+    Removes the MENTIONS edge (source_doc → reused_id, source_pass='dedup') and any
+    CONTEXT_REF nodes created during that apply run, then marks the snapshot 'rolled_back'.
+    Only 'reuse' decisions have graph effects; 'create' decisions are no-ops.
+    Use list_dedup_log() to find decision_ids.
+    """
+    from prism_rag.config import PrismRagSettings
+    from prism_rag.ingest.dedup_log import rollback_snapshot
+
+    settings   = PrismRagSettings()
+    nimbus_src = next((s for s in settings.resolved_graphs if s.namespace == "nimbus"), None)
+    if nimbus_src is None:
+        return json.dumps({"error": "nimbus namespace not configured"}, ensure_ascii=False)
+
+    dedup_log  = nimbus_src.data_dir / "dedup_log.jsonl"
+    graph_path = nimbus_src.data_dir / "graph.json"
+    vault_root = Path(nimbus_src.vault_path) if nimbus_src.vault_path else nimbus_src.data_dir.parent
+
+    status = rollback_snapshot(decision_id, dedup_log, vault_root, graph_path)
+
+    global _federated
+    _federated = None  # force graph reload after rollback
+    return json.dumps({"status": status}, ensure_ascii=False)
+
+
+@mcp.tool()
+def list_dedup_log(top_n: int = 10) -> str:
+    """List recent dedup decisions from dedup_log.jsonl (newest first).
+
+    Returns decision_id, action, claim_title, reused_id, similarity_score, rollback_status.
+    Use decision_id with rollback_dedup() to undo a reuse decision.
+    """
+    from prism_rag.config import PrismRagSettings
+    from prism_rag.ingest.dedup_log import list_snapshots
+
+    settings   = PrismRagSettings()
+    nimbus_src = next((s for s in settings.resolved_graphs if s.namespace == "nimbus"), None)
+    if nimbus_src is None:
+        return json.dumps({"error": "nimbus namespace not configured"}, ensure_ascii=False)
+
+    dedup_log = nimbus_src.data_dir / "dedup_log.jsonl"
+    snapshots = list_snapshots(dedup_log)
+    # Newest first, capped at top_n
+    recent = snapshots[-top_n:][::-1]
+    result = [
+        {
+            "decision_id": s.decision_id,
+            "action": s.action,
+            "claim_title": s.claim_title,
+            "reused_id": s.reused_id,
+            "similarity_score": s.similarity_score,
+            "source_doc": s.source_doc,
+            "timestamp": s.timestamp,
+            "rollback_status": s.rollback_status,
+        }
+        for s in recent
+    ]
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 # -- MCP Resources -----------------------------------------------------------
 #
 # Large reference material is exposed as resources (read on demand) rather than
