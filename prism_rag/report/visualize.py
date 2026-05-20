@@ -140,8 +140,9 @@ _HTML_TEMPLATE = """\
     <div id="legend">
       <span>size</span> = degree &nbsp;·&nbsp; <span>color</span> = community<br>
       <span>scroll</span> zoom &nbsp;·&nbsp; <span>drag</span> pan / move<br>
-      <span>click</span> focus node + neighbors<br>
-      <span>dbl-click</span> open in Obsidian
+      <span>click</span> focus node &nbsp;·&nbsp; <span>bg click</span> reset<br>
+      <span>right-click</span> open in Obsidian<br>
+      <span>WASD</span> pan &nbsp;·&nbsp; <span>+/-</span> zoom &nbsp;·&nbsp; <span>Esc</span> reset
     </div>
   </div>
 
@@ -359,6 +360,70 @@ _HTML_TEMPLATE = """\
       }}
       Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
       Graph.linkVisibility(_linkVisible);
+    }});
+
+    /* -- Keyboard controls -------------------------------------------------- */
+    /* WASD / arrow keys: pan   |   +/=/-: zoom   |   Escape: reset focus     */
+    var _keys = {{}};
+    var _rafId = null;
+
+    var _MOVE_KEYS = ['w','W','a','A','s','S','d','D',
+                      'ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
+
+    function _keyLoop() {{
+      var speed = 6 / (Graph.zoom() || 1);  /* faster when zoomed out */
+      var dx = 0, dy = 0;
+      if (_keys['w'] || _keys['W'] || _keys['ArrowUp'])    dy -= speed;
+      if (_keys['s'] || _keys['S'] || _keys['ArrowDown'])  dy += speed;
+      if (_keys['a'] || _keys['A'] || _keys['ArrowLeft'])  dx -= speed;
+      if (_keys['d'] || _keys['D'] || _keys['ArrowRight']) dx += speed;
+      if (dx !== 0 || dy !== 0) {{
+        var c = Graph.centerAt();
+        Graph.centerAt(c.x + dx, c.y + dy);
+      }}
+      var anyHeld = _MOVE_KEYS.some(function (k) {{ return _keys[k]; }});
+      _rafId = anyHeld ? requestAnimationFrame(_keyLoop) : null;
+    }}
+
+    window.addEventListener('keydown', function (e) {{
+      /* Ignore keyboard shortcuts when typing in search box */
+      if (document.activeElement === document.getElementById('search')) return;
+
+      /* Zoom */
+      if (e.key === '+' || e.key === '=' || e.key === 'NumpadAdd') {{
+        e.preventDefault();
+        Graph.zoom(Graph.zoom() * 1.25, 150);
+        return;
+      }}
+      if (e.key === '-' || e.key === '_' || e.key === 'NumpadSubtract') {{
+        e.preventDefault();
+        Graph.zoom(Graph.zoom() / 1.25, 150);
+        return;
+      }}
+
+      /* Escape: clear focus */
+      if (e.key === 'Escape') {{
+        _activeNode = null;
+        _applyFocus(null);
+        document.getElementById('info').style.display = 'none';
+        return;
+      }}
+
+      /* Pan */
+      if (_MOVE_KEYS.indexOf(e.key) !== -1) {{
+        e.preventDefault();
+        _keys[e.key] = true;
+        if (!_rafId) _rafId = requestAnimationFrame(_keyLoop);
+      }}
+    }});
+
+    window.addEventListener('keyup', function (e) {{
+      delete _keys[e.key];
+      /* Stop loop if no move keys held */
+      if (_rafId && !_MOVE_KEYS.some(function (k) {{ return _keys[k]; }})) {{
+        cancelAnimationFrame(_rafId);
+        _rafId = null;
+      }}
     }});
 
     /* -- URL hash focus: graph.html#NODE-ID --------------------------------- */
