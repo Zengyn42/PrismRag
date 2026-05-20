@@ -102,16 +102,59 @@ _OBSIDIAN_JS_TEMPLATE = """\
   /* Mapping: nodeId -> {{obsidian_uri: "..."}} or {{portal_href: "..."}} */
   var _prismNodeData = {node_data_json};
 
+  /* On-demand edges (e.g. mentions_symbol) — hidden until node is clicked.
+     Format: [{{id, from, to, title, color, dashes}}, ...] */
+  var _onDemandEdges = {on_demand_edges_json};
+
+  /* Track which node's on-demand edges are currently shown */
+  var _activeOnDemandNode = null;
+  var _activeEdgeIds = [];
+
+  function _showOnDemand(nodeId) {{
+    if (_activeOnDemandNode === nodeId) {{
+      /* Second click on same node — hide */
+      _hideOnDemand();
+      return;
+    }}
+    _hideOnDemand();
+    _activeOnDemandNode = nodeId;
+    var toAdd = _onDemandEdges.filter(function(e) {{
+      return e.from === nodeId || e.to === nodeId;
+    }});
+    if (!toAdd.length) return;
+    var edgesDS = network.body.data.edges;
+    toAdd.forEach(function(e) {{
+      edgesDS.add(e);
+      _activeEdgeIds.push(e.id);
+    }});
+  }}
+
+  function _hideOnDemand() {{
+    if (!_activeEdgeIds.length) return;
+    var edgesDS = network.body.data.edges;
+    edgesDS.remove(_activeEdgeIds);
+    _activeEdgeIds = [];
+    _activeOnDemandNode = null;
+  }}
+
   function _attach() {{
     if (typeof network === 'undefined') {{
       setTimeout(_attach, 50);
       return;
     }}
 
-    /* Click handler: open Obsidian or navigate to portal */
+    /* Click handler: on-demand edges + Obsidian/portal navigation */
     network.on('click', function (params) {{
-      if (!params.nodes.length) return;
+      if (!params.nodes.length) {{
+        _hideOnDemand();
+        return;
+      }}
       var nodeId = params.nodes[0];
+
+      /* Toggle on-demand edges */
+      if (_onDemandEdges.length) _showOnDemand(nodeId);
+
+      /* Navigation */
       var nd = _prismNodeData[nodeId];
       if (!nd) return;
       if (nd.portal_href) {{
@@ -177,6 +220,8 @@ def generate_html(
     bg_color: str = "#1a1a2e",
     font_color: str = "#e0e0e0",
     vault_name: str | None = None,
+    on_demand_relations: set[str] | None = None,
+    min_degree: int = 0,
 ) -> None:
     """Generate an interactive HTML graph visualization.
 
@@ -189,7 +234,29 @@ def generate_html(
         font_color: Label font color.
         vault_name: Obsidian vault name for deep-link URIs.
             When provided, clicking a note/knowledge node opens it in Obsidian.
+        on_demand_relations: Edge relation types to hide by default and show
+            only when a node is clicked (toggle). Defaults to {"mentions_symbol"}.
+            Pass an empty set to render all edges immediately.
+        min_degree: Only render nodes with degree >= this value (0 = all nodes).
+            Useful for large graphs: set to 10–20 to show only core/hub nodes.
+            Edges are included only when both endpoints survive the filter.
     """
+    if on_demand_relations is None:
+        on_demand_relations = {"mentions_symbol"}
+
+    # ── Pre-compute degree filter ────────────────────────────────────
+    # Degree is computed on structural edges only (excluding on_demand_relations)
+    # so that soft/noisy edges don't inflate importance scores.
+    if min_degree > 0:
+        degree_map: dict[str, int] = {}
+        for src, tgt, edata in graph.g.edges(data=True):
+            if edata.get("relation") in on_demand_relations:
+                continue
+            degree_map[src] = degree_map.get(src, 0) + 1
+            degree_map[tgt] = degree_map.get(tgt, 0) + 1
+        visible_nodes: set[str] = {n for n, d in degree_map.items() if d >= min_degree}
+    else:
+        visible_nodes = set(graph.g.nodes())
     net = Network(
         height=height,
         width=width,
@@ -216,6 +283,8 @@ def generate_html(
 
     # ── Add nodes ────────────────────────────────────────────────────
     for node_id, data in graph.g.nodes(data=True):
+        if node_id not in visible_nodes:
+            continue
         kind = data.get("kind", "note")
         label = data.get("label", node_id)
         community_id = data.get("community_id")
@@ -308,8 +377,14 @@ def generate_html(
             font={"size": 12 if kind in ("note", "knowledge") else 9},
         )
 
-    # ── Add edges ────────────────────────────────────────────────────
+    # ── Add edges (split: always-visible vs on-demand) ───────────────
+    on_demand_edge_list: list[dict] = []
+    _od_edge_counter = 0
+
     for source, target, data in graph.g.edges(data=True):
+        # Skip edges where either endpoint is filtered out
+        if source not in visible_nodes or target not in visible_nodes:
+            continue
         relation = data.get("relation", "?")
         confidence = data.get("confidence", "EXTRACTED")
         score = float(data.get("confidence_score", 1.0))
@@ -317,29 +392,44 @@ def generate_html(
 
         edge_color = _EDGE_COLORS.get(confidence, "rgba(150,150,150,0.5)")
         edge_width = 0.5 + weight * 2
-
         title = f"{relation}<br>confidence: {confidence}<br>score: {score:.2f}"
         dashes = confidence != "EXTRACTED"
+        arrows = "to" if relation in (
+            "links_to", "links_to_section", "links_to_block", "embeds"
+        ) else ""
 
-        net.add_edge(
-            source,
-            target,
-            title=title,
-            width=edge_width,
-            color=edge_color,
-            dashes=dashes,
-            arrows="to" if relation in (
-                "links_to", "links_to_section", "links_to_block", "embeds"
-            ) else "",
-        )
+        if relation in on_demand_relations:
+            # Store for JS on-demand rendering (not added to pyvis)
+            _od_edge_counter += 1
+            on_demand_edge_list.append({
+                "id": f"__od_{_od_edge_counter}",
+                "from": source,
+                "to": target,
+                "title": title,
+                "color": edge_color,
+                "dashes": dashes,
+                "width": edge_width,
+                "arrows": arrows,
+            })
+        else:
+            net.add_edge(
+                source,
+                target,
+                title=title,
+                width=edge_width,
+                color=edge_color,
+                dashes=dashes,
+                arrows=arrows,
+            )
 
     # ── Save + post-process ──────────────────────────────────────────
     output_path.parent.mkdir(parents=True, exist_ok=True)
     net.save_graph(str(output_path))
 
-    # Inject Obsidian + portal JS just before </body>
+    # Inject Obsidian + portal + on-demand JS just before </body>
     obsidian_js = _OBSIDIAN_JS_TEMPLATE.format(
-        node_data_json=json.dumps(prism_node_data, ensure_ascii=False)
+        node_data_json=json.dumps(prism_node_data, ensure_ascii=False),
+        on_demand_edges_json=json.dumps(on_demand_edge_list, ensure_ascii=False),
     )
     html = output_path.read_text(encoding="utf-8")
     html = html.replace("</body>", obsidian_js + "\n</body>")

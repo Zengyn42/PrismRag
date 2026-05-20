@@ -769,11 +769,148 @@ def calibrate() -> None:
     raise typer.Exit(0)
 
 
+@app.command(name="ingest-project")
+def ingest_project(
+    repo: Path = typer.Option(..., "--repo", "-r", help="Path to project root (code + docs)"),
+    data_dir: Path = typer.Option(None, "--data-dir", "-d", help="Output directory (default: PRISM_DATA_DIR/<namespace>)"),
+    namespace: str = typer.Option("", "--namespace", "-n", help="Graph namespace (default: repo directory name)"),
+    vault_name: str = typer.Option("", "--vault-name", help="Obsidian vault name for deep-link URIs in visualization"),
+    skip_cluster: bool = typer.Option(False, "--skip-cluster", help="Skip Leiden clustering"),
+    skip_embed: bool = typer.Option(False, "--skip-embed", help="Skip embedding computation"),
+) -> None:
+    """Ingest a project's code AND docs into one unified knowledge graph + HTML visualization.
+
+    Pipeline:
+      Pass 1a — Tree-sitter AST (Python files)
+      Pass 1b — Markdown vault loader + wikilink/tag extraction
+      Pass 2  — Leiden community detection
+      Pass 3a — Embeddings
+      Pass 3b — Similarity edges (doc↔doc, code↔code, doc↔code)
+      Pass 3c — Symbol links (mentions_symbol: doc → code)
+      Pass 4  — Persist graph.json + graph.html
+
+    Example:
+        prism-rag ingest-project --repo /home/kingy/Projects/Pulsify --namespace pulsify
+    """
+    from prism_rag.ingest.ast_extractor import extract_ast
+    from prism_rag.ingest.code_parser import CodeParser
+    from prism_rag.ingest.embedder import compute_embeddings, persist_embeddings
+    from prism_rag.ingest.similarity_linker import link_similar_nodes
+    from prism_rag.ingest.symbol_linker import link_symbols
+    from prism_rag.ingest.vault_loader import load_vault
+    from prism_rag.store.networkx_backend import NetworkXBackend
+
+    repo = repo.expanduser().resolve()
+    if not repo.exists():
+        typer.secho(f"❌ Repo not found: {repo}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    ns = namespace or repo.name
+    settings = PrismRagSettings()
+    out_dir = (data_dir or settings.data_dir / ns).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    typer.secho(f"📂 Repo:      {repo}", fg=typer.colors.CYAN)
+    typer.secho(f"📁 Output:    {out_dir}", fg=typer.colors.CYAN)
+    typer.secho(f"🏷  Namespace: {ns}", fg=typer.colors.CYAN)
+    typer.echo("")
+
+    graph = KnowledgeGraph()
+
+    # ── Pass 1a: Python code (Tree-sitter) ──
+    typer.secho("🔍 Pass 1a: Parsing Python files with Tree-sitter...", fg=typer.colors.BLUE)
+    parser = CodeParser()
+    result = parser.parse(repo)
+    backend = NetworkXBackend(graph)
+    backend.write_result(result)
+    typer.echo(f"   Code nodes: {graph.node_count} · Code edges: {graph.edge_count}")
+
+    # ── Pass 1b: Markdown docs ──
+    typer.secho("\n📄 Pass 1b: Discovering markdown files...", fg=typer.colors.BLUE)
+    docs, live_sha_set = load_vault(repo)
+    if docs:
+        typer.echo(f"   Found {len(docs)} markdown files")
+        before_nodes = graph.node_count
+        extract_ast(graph, docs)
+        typer.echo(f"   Doc nodes added: {graph.node_count - before_nodes} · Total nodes: {graph.node_count}")
+    else:
+        typer.secho("   No markdown files found, skipping.", fg=typer.colors.YELLOW)
+
+    # ── Pass 2: Leiden clustering ──
+    if skip_cluster:
+        typer.secho("\n⏭  Pass 2: Leiden clustering (skipped)", fg=typer.colors.YELLOW)
+    else:
+        typer.secho("\n🧠 Pass 2: Leiden community detection...", fg=typer.colors.BLUE)
+        n_communities = run_leiden(
+            graph,
+            resolution=settings.leiden_resolution,
+            seed=settings.leiden_seed,
+            god_nodes_per_community=settings.god_nodes_per_community,
+        )
+        typer.echo(f"   Communities: {n_communities}")
+
+    # ── Pass 3a: Embedding ──
+    vectors: dict = {}
+    if skip_embed:
+        typer.secho("\n⏭  Pass 3a: Embedding (skipped)", fg=typer.colors.YELLOW)
+    else:
+        _backend_label = (
+            f"ollama/{settings.ollama_model}"
+            if settings.embed_backend == "ollama"
+            else f"gemini/{settings.gemini_embed_model}"
+        )
+        typer.secho(f"\n🔢 Pass 3a: Computing embeddings ({_backend_label}, dim={settings.embedding_dim})...", fg=typer.colors.BLUE)
+        try:
+            vectors = compute_embeddings(graph, settings, cache_path=out_dir / "embed_cache.jsonl")
+            lance_path = out_dir / "lance"
+            n_persisted = persist_embeddings(vectors, lance_path, dim=settings.embedding_dim)
+            typer.echo(f"   Embeddings: {n_persisted} → {lance_path}")
+        except Exception as exc:
+            typer.secho(f"   ⚠ Embedding failed (continuing): {exc}", fg=typer.colors.YELLOW, err=True)
+
+    # ── Pass 3b: Similarity edges (doc↔code cross-type included) ──
+    if vectors:
+        typer.secho("\n🔗 Pass 3b: Generating similarity edges (doc↔code)...", fg=typer.colors.BLUE)
+        n_sim = link_similar_nodes(graph, vectors, settings)
+        typer.echo(f"   Similarity edges added: {n_sim} · Total edges: {graph.edge_count}")
+    else:
+        typer.secho("\n⏭  Pass 3b: Similarity edges (skipped — no vectors)", fg=typer.colors.YELLOW)
+
+    # ── Pass 3c: Symbol links (mentions_symbol: doc → code) ──
+    typer.secho("\n🔗 Pass 3c: Linking doc mentions → code symbols...", fg=typer.colors.BLUE)
+    try:
+        n_ext, n_inf, n_amb = link_symbols(graph, graph)
+        total_sym = n_ext + n_inf + n_amb
+        typer.echo(f"   Symbol edges: {total_sym} (EXTRACTED={n_ext}, INFERRED={n_inf}, AMBIGUOUS={n_amb})")
+    except Exception as exc:
+        typer.secho(f"   ⚠ Symbol linking failed (continuing): {exc}", fg=typer.colors.YELLOW, err=True)
+
+    # ── Pass 4a: Persist graph.json ──
+    typer.secho("\n💾 Pass 4a: Persisting graph...", fg=typer.colors.BLUE)
+    graph_path = out_dir / "graph.json"
+    graph.save(graph_path)
+    typer.echo(f"   → {graph_path}")
+
+    # ── Pass 4b: HTML visualization ──
+    typer.secho("\n🎨 Pass 4b: Generating HTML visualization...", fg=typer.colors.BLUE)
+    try:
+        from prism_rag.report.visualize import generate_html
+        html_path = out_dir / "graph.html"
+        generate_html(graph, html_path, vault_name=vault_name or None)
+        typer.echo(f"   → {html_path}")
+    except ImportError:
+        typer.secho("   ⏭  Visualization skipped (install pyvis: pip install prism-rag[viz])", fg=typer.colors.YELLOW)
+
+    typer.secho("\n✅ ingest-project complete.", fg=typer.colors.GREEN)
+    typer.echo(f"   To serve: add namespace={ns!r} data_dir={out_dir!r} to PRISM_GRAPHS, then 'prism-rag serve'")
+
+
 @app.command()
 def visualize(
     namespace: str = typer.Option("", "--namespace", "-n", help="Namespace to visualize (default: first namespace)"),
     output: Path = typer.Option(None, "--output", "-o", help="Output HTML path (default: data_dir/graph.html)"),
     vault: str = typer.Option("", "--vault", "-v", help="Obsidian vault name for deep-link URIs"),
+    min_degree: int = typer.Option(0, "--min-degree", "-d", help="Only show nodes with degree >= N (0 = all). Use 10-20 for large graphs."),
 ) -> None:
     """Generate an interactive HTML knowledge graph visualization.
 
@@ -822,7 +959,7 @@ def visualize(
 
     graph = KnowledgeGraph.load(graph_path)
     out = output or (src.data_dir / "graph.html")
-    generate_html(graph, out, vault_name=vault_name)
+    generate_html(graph, out, vault_name=vault_name, min_degree=min_degree)
     typer.secho(f"✅ Graph visualization → {out}", fg=typer.colors.GREEN)
 
 
