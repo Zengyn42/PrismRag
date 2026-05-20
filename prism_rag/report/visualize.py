@@ -140,7 +140,8 @@ _HTML_TEMPLATE = """\
     <div id="legend">
       <span>size</span> = degree &nbsp;·&nbsp; <span>color</span> = community<br>
       <span>scroll</span> zoom &nbsp;·&nbsp; <span>drag</span> pan / move<br>
-      <span>click</span> toggle mentions + open Obsidian
+      <span>click</span> focus node + neighbors<br>
+      <span>dbl-click</span> open in Obsidian
     </div>
   </div>
 
@@ -162,17 +163,53 @@ _HTML_TEMPLATE = """\
   <script>
   (function () {{
     var GD = {graph_data_json};
-    var _activeNode = null;
+    var _activeNode = null;       /* currently clicked node id */
+    var _focusSet = null;         /* Set of visible node ids in focus mode (null = show all) */
     var _origColors = {{}};
     GD.nodes.forEach(function (n) {{ _origColors[n.id] = n.color; }});
 
+    /* -- Adjacency map (built from raw string ids before force-graph resolves them) -- */
+    var _adj = {{}};  /* nodeId -> {{neighborId: true}} — structural edges only */
+    GD.links.forEach(function (l) {{
+      if (l._onDemand) return;
+      var s = l.source, t = l.target;
+      if (!_adj[s]) _adj[s] = {{}};
+      if (!_adj[t]) _adj[t] = {{}};
+      _adj[s][t] = true;
+      _adj[t][s] = true;
+    }});
+
+    /* -- Focus: show only clicked node + direct neighbors ------------------ */
+    function _applyFocus(nodeId) {{
+      if (!nodeId) {{
+        _focusSet = null;
+        GD.nodes.forEach(function (n) {{ n._dimmed = false; }});
+      }} else {{
+        _focusSet = {{}};
+        _focusSet[nodeId] = true;
+        var neighbors = _adj[nodeId] || {{}};
+        Object.keys(neighbors).forEach(function (nid) {{ _focusSet[nid] = true; }});
+        GD.nodes.forEach(function (n) {{ n._dimmed = !_focusSet[n.id]; }});
+      }}
+      /* Re-set nodeColor accessor to trigger a canvas repaint */
+      Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
+      Graph.linkVisibility(_linkVisible);
+    }}
+
     /* -- Link visibility callback ----------------------------------------- */
     function _linkVisible(link) {{
-      if (!link._onDemand) return true;
-      if (!_activeNode) return false;
       var s = typeof link.source === 'object' ? link.source.id : link.source;
       var t = typeof link.target === 'object' ? link.target.id : link.target;
-      return s === _activeNode || t === _activeNode;
+
+      /* Focus mode: only show edges between focused nodes */
+      if (_focusSet && (!_focusSet[s] || !_focusSet[t])) return false;
+
+      /* On-demand edges: only when their node is the active node */
+      if (link._onDemand) {{
+        if (!_activeNode) return false;
+        return s === _activeNode || t === _activeNode;
+      }}
+      return true;
     }}
 
     /* -- Info panel (DOM-safe: textContent only) ---------------------------- */
@@ -278,21 +315,24 @@ _HTML_TEMPLATE = """\
       }})
       .nodeLabel(function (node) {{ return node.tooltip || node.label || node.id; }})
       .onNodeClick(function (node) {{
-        _activeNode = (_activeNode === node.id) ? null : node.id;
-        Graph.linkVisibility(_linkVisible);
-        _showInfo(node);
-        if (node.portal_href) {{
-          window.location.href = node.portal_href;
-        }} else if (node.obsidian_uri) {{
-          window.open(node.obsidian_uri, '_blank');
+        var same = (_activeNode === node.id);
+        _activeNode = same ? null : node.id;
+        _applyFocus(_activeNode);
+        if (same) {{
+          document.getElementById('info').style.display = 'none';
+        }} else {{
+          _showInfo(node);
         }}
+      }})
+      .onNodeRightClick(function (node) {{
+        /* Right-click / long-press: navigate to Obsidian or portal */
+        if (node.portal_href) window.location.href = node.portal_href;
+        else if (node.obsidian_uri) window.open(node.obsidian_uri, '_blank');
       }})
       .onBackgroundClick(function () {{
         _activeNode = null;
-        Graph.linkVisibility(_linkVisible);
+        _applyFocus(null);
         document.getElementById('info').style.display = 'none';
-        GD.nodes.forEach(function (n) {{ n._dimmed = false; }});
-        Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
       }});
 
     /* -- Responsive --------------------------------------------------------- */
@@ -300,22 +340,25 @@ _HTML_TEMPLATE = """\
       Graph.width(window.innerWidth).height(window.innerHeight);
     }});
 
-    /* -- Search: dim non-matching nodes ------------------------------------- */
+    /* -- Search: highlight matching nodes (clears focus) ------------------- */
     document.getElementById('search').addEventListener('input', function (e) {{
       var q = e.target.value.toLowerCase().trim();
+      /* Clear focus when searching */
+      _activeNode = null;
+      _focusSet = null;
+      document.getElementById('info').style.display = 'none';
       if (!q) {{
         GD.nodes.forEach(function (n) {{ n._dimmed = false; }});
-        Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
-        return;
+      }} else {{
+        GD.nodes.forEach(function (n) {{
+          n._dimmed = !(
+            (n.label || '').toLowerCase().indexOf(q) !== -1 ||
+            (n.id || '').toLowerCase().indexOf(q) !== -1
+          );
+        }});
       }}
-      GD.nodes.forEach(function (n) {{
-        n._dimmed = !(
-          (n.label || '').toLowerCase().indexOf(q) !== -1 ||
-          (n.id || '').toLowerCase().indexOf(q) !== -1
-        );
-      }});
-      /* trigger re-render by re-setting nodeColor accessor */
       Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
+      Graph.linkVisibility(_linkVisible);
     }});
 
     /* -- URL hash focus: graph.html#NODE-ID --------------------------------- */
