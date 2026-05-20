@@ -106,12 +106,48 @@ _HTML_TEMPLATE = """\
     }}
     #search:focus {{ border-color: rgba(255,255,255,0.45); }}
     #legend {{
-      background: rgba(20,20,36,0.75);
-      border: 1px solid rgba(255,255,255,0.10);
-      padding: 8px 12px; border-radius: 7px;
-      font-size: 11px; line-height: 1.8; color: rgba(255,255,255,0.55);
+      pointer-events: all;
+      background: rgba(20,20,36,0.82);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 8px; font-size: 11px;
+      color: rgba(255,255,255,0.55);
+      min-width: 180px; overflow: hidden;
     }}
-    #legend span {{ color: rgba(255,255,255,0.85); }}
+    #legend-header {{
+      padding: 7px 12px; cursor: pointer;
+      color: rgba(255,255,255,0.75); font-size: 11px;
+      display: flex; justify-content: space-between; align-items: center;
+      user-select: none;
+    }}
+    #legend-header:hover {{ color: #fff; }}
+    #legend-body {{ padding: 0 12px 10px; display: block; }}
+    #legend-body.collapsed {{ display: none; }}
+    .leg-section {{
+      font-size: 10px; color: rgba(255,255,255,0.3);
+      letter-spacing: .08em; text-transform: uppercase;
+      margin: 8px 0 4px;
+    }}
+    .leg-row {{
+      display: flex; align-items: center; gap: 7px;
+      line-height: 1.9; color: rgba(255,255,255,0.65);
+    }}
+    .swatch {{
+      width: 10px; height: 10px; border-radius: 50%;
+      flex-shrink: 0; display: inline-block;
+    }}
+    .swatch-line {{
+      width: 20px; height: 2px; flex-shrink: 0; border-radius: 1px;
+    }}
+    .swatch-inferred {{
+      background: repeating-linear-gradient(
+        90deg, rgba(100,180,255,0.5) 0 4px, transparent 4px 7px);
+      height: 2px;
+    }}
+    kbd {{
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 3px; padding: 0 4px; font-size: 10px;
+      font-family: monospace; color: rgba(255,255,255,0.8);
+    }}
     #stats {{
       position: fixed; top: 12px; right: 12px; z-index: 20;
       font-size: 11px; color: rgba(255,255,255,0.28); text-align: right;
@@ -138,11 +174,40 @@ _HTML_TEMPLATE = """\
   <div id="hud">
     <input id="search" type="text" placeholder="Search nodes..." autocomplete="off" spellcheck="false"/>
     <div id="legend">
-      <span>size</span> = degree &nbsp;·&nbsp; <span>color</span> = community<br>
-      <span>scroll</span> zoom &nbsp;·&nbsp; <span>drag</span> pan / move<br>
-      <span>click</span> focus node &nbsp;·&nbsp; <span>bg click</span> reset<br>
-      <span>right-click</span> open in Obsidian<br>
-      <span>WASD</span> pan &nbsp;·&nbsp; <span>+/-</span> zoom &nbsp;·&nbsp; <span>Esc</span> reset
+      <div id="legend-header">
+        <span>Legend</span><span id="legend-arrow">▾</span>
+      </div>
+      <div id="legend-body">
+
+        <div class="leg-section">Node — Code</div>
+        <div class="leg-row"><span class="swatch" style="background:#4363d8"></span>function</div>
+        <div class="leg-row"><span class="swatch" style="background:#911eb4"></span>class</div>
+        <div class="leg-row"><span class="swatch" style="background:#f58231"></span>module</div>
+        <div class="leg-row"><span class="swatch" style="background:#42d4f4"></span>flow</div>
+
+        <div class="leg-section">Node — Docs</div>
+        {community_legend_html}
+        <div class="leg-row" style="color:rgba(255,255,255,0.35);font-size:10px;margin-top:2px">color = cluster (Leiden)</div>
+
+        <div class="leg-section">Node — Other</div>
+        <div class="leg-row"><span class="swatch" style="background:#F5A623"></span>portal / cross-ref</div>
+        <div class="leg-row" style="color:rgba(255,255,255,0.45);font-size:10px">size = degree</div>
+
+        <div class="leg-section">Edges</div>
+        <div class="leg-row"><span class="swatch-line" style="background:rgba(200,200,200,0.6)"></span>structural</div>
+        <div class="leg-row"><span class="swatch-inferred swatch-line"></span>inferred</div>
+        <div class="leg-row"><span class="swatch-line" style="background:rgba(100,180,255,0.35)"></span>semantic similarity</div>
+        <div class="leg-row" style="color:rgba(255,255,255,0.45);font-size:10px">&#9654; particles = wiki-link</div>
+        <div class="leg-row" style="color:rgba(255,200,80,0.6);font-size:10px">click node = mentions_symbol</div>
+
+        <div class="leg-section">Controls</div>
+        <div class="leg-row"><kbd>click</kbd>&nbsp;focus node</div>
+        <div class="leg-row"><kbd>click bg</kbd>&nbsp;/ <kbd>Esc</kbd>&nbsp;reset</div>
+        <div class="leg-row"><kbd>right-click</kbd>&nbsp;open Obsidian</div>
+        <div class="leg-row"><kbd>WASD</kbd>&nbsp;pan</div>
+        <div class="leg-row"><kbd>+</kbd>&nbsp;<kbd>-</kbd>&nbsp;zoom</div>
+
+      </div>
     </div>
   </div>
 
@@ -360,6 +425,14 @@ _HTML_TEMPLATE = """\
       }}
       Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
       Graph.linkVisibility(_linkVisible);
+    }});
+
+    /* -- Legend toggle ------------------------------------------------------ */
+    document.getElementById('legend-header').addEventListener('click', function () {{
+      var body = document.getElementById('legend-body');
+      var arrow = document.getElementById('legend-arrow');
+      var collapsed = body.classList.toggle('collapsed');
+      arrow.textContent = collapsed ? '▸' : '▾';
     }});
 
     /* -- Keyboard controls -------------------------------------------------- */
@@ -638,6 +711,32 @@ def generate_html(
 
     title = vault_name or output_path.parent.name or "PrismRag Graph"
 
+    # ── Community legend: collect unique communities from doc nodes ───────────
+    # Count nodes per community (doc kinds only, excluding code kinds)
+    _code_kinds = set(_KIND_COLORS.keys()) | {"context_ref"}
+    community_counts: dict[str, int] = {}
+    for n in nodes:
+        if n.get("kind") in _code_kinds:
+            continue
+        cid = n.get("community", "")
+        if cid:
+            community_counts[cid] = community_counts.get(cid, 0) + 1
+
+    # Sort by count desc, take top 8 to keep legend compact
+    top_communities = sorted(community_counts, key=lambda c: -community_counts[c])[:8]
+    community_legend_rows = []
+    for cid in top_communities:
+        color = _community_color(cid)
+        count = community_counts[cid]
+        label = f"cluster {cid.split('_')[-1]} ({count} nodes)"
+        community_legend_rows.append(
+            f'<div class="leg-row">'
+            f'<span class="swatch" style="background:{color}"></span>'
+            f'{label}'
+            f'</div>'
+        )
+    community_legend_html = "\n        ".join(community_legend_rows) if community_legend_rows else ""
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     html = _HTML_TEMPLATE.format(
         title=title,
@@ -646,6 +745,7 @@ def generate_html(
         node_count=len(nodes),
         link_count=len(links),
         od_count=len(od_links),
+        community_legend_html=community_legend_html,
         graph_data_json=json.dumps(graph_data, ensure_ascii=False, separators=(",", ":")),
     )
     output_path.write_text(html, encoding="utf-8")
