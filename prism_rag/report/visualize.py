@@ -1,39 +1,40 @@
-"""Generate an interactive HTML knowledge graph visualization using pyvis.
+"""Generate an interactive HTML knowledge graph visualization using force-graph.
 
 Produces a standalone graph.html file that can be opened in any browser.
 
 Visual encoding:
-- Node size: proportional to degree (god nodes are bigger)
-- Node color: mapped to community_id (each community gets a distinct hue)
-- Node shape: circle for notes, diamond for tags, triangle for categories
-- Portal nodes (context_ref, cross-namespace): hexagon + orange (#F5A623)
-- Edge width: proportional to weight (confidence_score)
-- Edge color: EXTRACTED=solid bright, INFERRED=semi-transparent
-- Edge style: dashed for INFERRED edges
+- Node size: proportional to structural degree (larger = more connected)
+- Node color: mapped to community_id (distinct hue per cluster)
+- Node glow: soft halo in node color (WebGL canvas)
+- Edge particles: animated flow on wiki-link / cross-namespace edges
+- Edge color: EXTRACTED=bright, INFERRED=semi-transparent
+- On-demand edges (e.g. mentions_symbol): shown only on node click (toggle)
 
 Interaction:
-- Drag to rearrange
-- Scroll to zoom
-- Hover to see node info
-- Click to open in Obsidian (vault nodes) or navigate to portal target
-- Physics simulation (Barnes-Hut) for force-directed layout
-- URL hash (#NODE-ID) focuses that node after stabilization
+- Scroll/pinch: zoom (labels appear progressively as you zoom in — LOD)
+- Drag background: pan
+- Drag node: reposition
+- Click node: toggle mentions_symbol edges + open in Obsidian / portal
+- Click background: clear selection
+- Search box: highlight matching nodes
+- URL hash (#NODE-ID): auto-focuses that node after layout stabilizes
+
+Renderer: vasturiano/force-graph (D3-force + HTML5 Canvas, CDN)
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from urllib.parse import quote
-
-from pyvis.network import Network
 
 from prism_rag.store.graph import KnowledgeGraph
 
 logger = logging.getLogger(__name__)
 
-# Community colors — 12 distinct hues, enough for most vaults
+# ── Community palette ──────────────────────────────────────────────────────────
 _COMMUNITY_COLORS = [
     "#e6194b",  # red
     "#3cb44b",  # green
@@ -49,144 +50,298 @@ _COMMUNITY_COLORS = [
     "#9A6324",  # brown
 ]
 
-# Node shapes by kind
-_KIND_SHAPES = {
-    # vault
-    "note": "dot",
-    "tag": "diamond",
-    "category": "triangle",
-    "knowledge": "dot",
-    "image": "square",
-    "pdf": "square",
-    "audio": "square",
-    "section": "dot",
-    "block": "dot",
-    # portal / cross-namespace
-    "context_ref": "hexagon",
-    # code
-    "function": "dot",
-    "class": "square",
-    "module": "triangle",
-    "flow": "hexagon",
+# ── Kind → color overrides ────────────────────────────────────────────────────
+_KIND_COLORS: dict[str, str] = {
+    "function":    "#4363d8",
+    "class":       "#911eb4",
+    "module":      "#f58231",
+    "flow":        "#42d4f4",
+    "context_ref": "#F5A623",
 }
 
-# Node colors by kind (code namespace gets distinct palette)
-_KIND_COLORS = {
-    "function": "#4363d8",   # blue
-    "class":    "#911eb4",   # purple
-    "module":   "#f58231",   # orange
-    "flow":     "#42d4f4",   # cyan
-    # portal nodes
-    "context_ref": "#F5A623",  # amber / portal orange
+_PORTAL_COLOR = "#F5A623"
+
+# ── Edge base colors by confidence ────────────────────────────────────────────
+_EDGE_COLORS: dict[str, str] = {
+    "EXTRACTED": "rgba(200,200,200,0.6)",
+    "INFERRED":  "rgba(100,180,255,0.3)",
+    "AMBIGUOUS": "rgba(255,200,100,0.25)",
 }
 
-_PORTAL_COLOR = "#F5A623"   # shared portal color for cross-namespace nodes
+# ── Relations that get animated particles ─────────────────────────────────────
+_PARTICLE_RELATIONS = frozenset({
+    "links_to",
+    "links_to_section",
+    "links_to_block",
+    "cross_namespace",
+})
 
-# Edge colors by confidence
-_EDGE_COLORS = {
-    "EXTRACTED": "rgba(200, 200, 200, 0.8)",
-    "INFERRED": "rgba(100, 180, 255, 0.4)",
-    "AMBIGUOUS": "rgba(255, 200, 100, 0.3)",
-}
-
-# ---------------------------------------------------------------------------
-# JavaScript injected just before </body>
-# Handles:
-#   1. Obsidian URI click-to-open for note/knowledge nodes
-#   2. Portal navigation (portal_href) for context_ref / cross-namespace nodes
-#   3. URL hash (#NODE-ID) focus after stabilization
-# ---------------------------------------------------------------------------
-_OBSIDIAN_JS_TEMPLATE = """\
-<script type="text/javascript">
-(function () {{
-  /* Mapping: nodeId -> {{obsidian_uri: "..."}} or {{portal_href: "..."}} */
-  var _prismNodeData = {node_data_json};
-
-  /* On-demand edges (e.g. mentions_symbol) — hidden until node is clicked.
-     Format: [{{id, from, to, title, color, dashes}}, ...] */
-  var _onDemandEdges = {on_demand_edges_json};
-
-  /* Track which node's on-demand edges are currently shown */
-  var _activeOnDemandNode = null;
-  var _activeEdgeIds = [];
-
-  function _showOnDemand(nodeId) {{
-    if (_activeOnDemandNode === nodeId) {{
-      /* Second click on same node — hide */
-      _hideOnDemand();
-      return;
+# ── Standalone HTML template ──────────────────────────────────────────────────
+# Note: all user-supplied content is set via textContent (DOM API) in JS,
+# never via innerHTML, to prevent XSS.
+_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>{title}</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ background: {bg_color}; overflow: hidden; font-family: monospace; color: {font_color}; }}
+    #graph {{ width: 100vw; height: 100vh; display: block; }}
+    #hud {{
+      position: fixed; top: 12px; left: 12px; z-index: 20;
+      display: flex; flex-direction: column; gap: 8px;
+      pointer-events: none;
     }}
-    _hideOnDemand();
-    _activeOnDemandNode = nodeId;
-    var toAdd = _onDemandEdges.filter(function(e) {{
-      return e.from === nodeId || e.to === nodeId;
-    }});
-    if (!toAdd.length) return;
-    var edgesDS = network.body.data.edges;
-    toAdd.forEach(function(e) {{
-      edgesDS.add(e);
-      _activeEdgeIds.push(e.id);
-    }});
-  }}
+    #search {{
+      pointer-events: all;
+      background: rgba(20,20,36,0.88);
+      border: 1px solid rgba(255,255,255,0.18);
+      color: {font_color};
+      padding: 6px 11px; border-radius: 7px;
+      font-size: 13px; width: 230px; outline: none;
+      transition: border-color .15s;
+    }}
+    #search:focus {{ border-color: rgba(255,255,255,0.45); }}
+    #legend {{
+      background: rgba(20,20,36,0.75);
+      border: 1px solid rgba(255,255,255,0.10);
+      padding: 8px 12px; border-radius: 7px;
+      font-size: 11px; line-height: 1.8; color: rgba(255,255,255,0.55);
+    }}
+    #legend span {{ color: rgba(255,255,255,0.85); }}
+    #stats {{
+      position: fixed; top: 12px; right: 12px; z-index: 20;
+      font-size: 11px; color: rgba(255,255,255,0.28); text-align: right;
+      line-height: 1.6;
+    }}
+    #info {{
+      position: fixed; bottom: 14px; right: 14px; z-index: 20;
+      background: rgba(20,20,36,0.92);
+      border: 1px solid rgba(255,255,255,0.18);
+      padding: 11px 15px; border-radius: 9px;
+      font-size: 12px; max-width: 340px;
+      display: none; line-height: 1.65;
+    }}
+    #info-title {{ font-size: 14px; color: #fff; margin-bottom: 5px; word-break: break-all; font-weight: bold; }}
+    #info-meta {{ color: rgba(255,255,255,0.5); font-size: 11px; }}
+    #info-file {{ color: rgba(120,200,255,0.7); margin-top: 3px; font-size: 11px; word-break: break-all; }}
+    #info-sig {{ color: rgba(255,255,255,0.45); margin-top: 3px; font-size: 11px; font-style: italic; }}
+    #info-hint {{ color: rgba(255,200,80,0.6); margin-top: 5px; font-size: 10px; }}
+  </style>
+</head>
+<body>
+  <div id="graph"></div>
 
-  function _hideOnDemand() {{
-    if (!_activeEdgeIds.length) return;
-    var edgesDS = network.body.data.edges;
-    edgesDS.remove(_activeEdgeIds);
-    _activeEdgeIds = [];
-    _activeOnDemandNode = null;
-  }}
+  <div id="hud">
+    <input id="search" type="text" placeholder="Search nodes..." autocomplete="off" spellcheck="false"/>
+    <div id="legend">
+      <span>size</span> = degree &nbsp;·&nbsp; <span>color</span> = community<br>
+      <span>scroll</span> zoom &nbsp;·&nbsp; <span>drag</span> pan / move<br>
+      <span>click</span> toggle mentions + open Obsidian
+    </div>
+  </div>
 
-  function _attach() {{
-    if (typeof network === 'undefined') {{
-      setTimeout(_attach, 50);
-      return;
+  <div id="stats">
+    <span id="stat-nodes">{node_count}</span> nodes<br>
+    <span id="stat-links">{link_count}</span> links<br>
+    <span id="stat-od">{od_count}</span> on-demand
+  </div>
+
+  <div id="info">
+    <div id="info-title"></div>
+    <div id="info-meta"></div>
+    <div id="info-file"></div>
+    <div id="info-sig"></div>
+    <div id="info-hint"></div>
+  </div>
+
+  <script src="https://unpkg.com/force-graph@1/dist/force-graph.min.js"></script>
+  <script>
+  (function () {{
+    var GD = {graph_data_json};
+    var _activeNode = null;
+    var _origColors = {{}};
+    GD.nodes.forEach(function (n) {{ _origColors[n.id] = n.color; }});
+
+    /* -- Link visibility callback ----------------------------------------- */
+    function _linkVisible(link) {{
+      if (!link._onDemand) return true;
+      if (!_activeNode) return false;
+      var s = typeof link.source === 'object' ? link.source.id : link.source;
+      var t = typeof link.target === 'object' ? link.target.id : link.target;
+      return s === _activeNode || t === _activeNode;
     }}
 
-    /* Click handler: on-demand edges + Obsidian/portal navigation */
-    network.on('click', function (params) {{
-      if (!params.nodes.length) {{
-        _hideOnDemand();
+    /* -- Info panel (DOM-safe: textContent only) ---------------------------- */
+    function _setText(id, val) {{
+      var el = document.getElementById(id);
+      if (el) el.textContent = val || '';
+    }}
+    function _setVisible(id, show) {{
+      var el = document.getElementById(id);
+      if (el) el.style.display = show ? '' : 'none';
+    }}
+
+    function _showInfo(node) {{
+      var hasMentions = GD.links.some(function (l) {{
+        if (!l._onDemand) return false;
+        var s = typeof l.source === 'object' ? l.source.id : l.source;
+        var t = typeof l.target === 'object' ? l.target.id : l.target;
+        return s === node.id || t === node.id;
+      }});
+      _setText('info-title', node.label || node.id);
+      _setText('info-meta',
+        'kind: ' + (node.kind || '?') +
+        '  degree: ' + (node.degree || 0) +
+        (node.community ? '  cluster: ' + node.community : '')
+      );
+      _setText('info-file', node.source_file || '');
+      _setText('info-sig', node.sig || '');
+      var hint = '';
+      if (hasMentions) {{
+        hint = (_activeNode === node.id)
+          ? 'click again to hide mentions'
+          : 'click to show symbol mentions';
+      }} else if (node.obsidian_uri) {{
+        hint = 'opens in Obsidian';
+      }} else if (node.portal_href) {{
+        hint = 'portal link';
+      }}
+      _setText('info-hint', hint);
+      document.getElementById('info').style.display = 'block';
+    }}
+
+    /* -- Build graph -------------------------------------------------------- */
+    var Graph = ForceGraph()(document.getElementById('graph'))
+      .backgroundColor('{bg_color}')
+      .width(window.innerWidth)
+      .height(window.innerHeight)
+      .graphData(GD)
+      .nodeId('id')
+      .nodeVal('val')
+      .linkColor('color')
+      .linkWidth('width')
+      .linkVisibility(_linkVisible)
+      .linkDirectionalParticles('particles')
+      .linkDirectionalParticleSpeed(0.005)
+      .linkDirectionalParticleWidth(2.5)
+      .linkDirectionalParticleColor('color')
+      .nodeCanvasObjectMode(function () {{ return 'replace'; }})
+      .nodeCanvasObject(function (node, ctx, globalScale) {{
+        var r = Math.sqrt(Math.max(1, node.val)) * 4;
+        var baseCol = _origColors[node.id] || '#888888';
+        var col = (node._dimmed) ? baseCol + '18' : baseCol;
+
+        /* Glow halo */
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r * 2.2, 0, 2 * Math.PI);
+        ctx.fillStyle = baseCol + (node._dimmed ? '08' : '28');
+        ctx.fill();
+
+        /* Node circle */
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+        ctx.fillStyle = col;
+        ctx.fill();
+
+        /* Active ring */
+        if (_activeNode === node.id) {{
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r + 3, 0, 2 * Math.PI);
+          ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+          ctx.lineWidth = 1.5 / globalScale;
+          ctx.stroke();
+        }}
+
+        /* LOD label - fades in as user zooms */
+        if (globalScale > 0.45) {{
+          var fontSize = Math.min(14, Math.max(8, 11 / globalScale));
+          ctx.font = fontSize + 'px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillStyle = '{font_color}';
+          var alpha = Math.min(1, (globalScale - 0.45) / 0.3);
+          ctx.globalAlpha = alpha * (node._dimmed ? 0.15 : 1);
+          ctx.fillText((node.label || '').substring(0, 24), node.x, node.y + r + 2);
+          ctx.globalAlpha = 1;
+        }}
+      }})
+      .nodePointerAreaPaint(function (node, color, ctx) {{
+        var r = Math.sqrt(Math.max(1, node.val)) * 4;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+        ctx.fillStyle = color;
+        ctx.fill();
+      }})
+      .nodeLabel(function (node) {{ return node.tooltip || node.label || node.id; }})
+      .onNodeClick(function (node) {{
+        _activeNode = (_activeNode === node.id) ? null : node.id;
+        Graph.linkVisibility(_linkVisible);
+        _showInfo(node);
+        if (node.portal_href) {{
+          window.location.href = node.portal_href;
+        }} else if (node.obsidian_uri) {{
+          window.open(node.obsidian_uri, '_blank');
+        }}
+      }})
+      .onBackgroundClick(function () {{
+        _activeNode = null;
+        Graph.linkVisibility(_linkVisible);
+        document.getElementById('info').style.display = 'none';
+        GD.nodes.forEach(function (n) {{ n._dimmed = false; }});
+        Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
+      }});
+
+    /* -- Responsive --------------------------------------------------------- */
+    window.addEventListener('resize', function () {{
+      Graph.width(window.innerWidth).height(window.innerHeight);
+    }});
+
+    /* -- Search: dim non-matching nodes ------------------------------------- */
+    document.getElementById('search').addEventListener('input', function (e) {{
+      var q = e.target.value.toLowerCase().trim();
+      if (!q) {{
+        GD.nodes.forEach(function (n) {{ n._dimmed = false; }});
+        Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
         return;
       }}
-      var nodeId = params.nodes[0];
-
-      /* Toggle on-demand edges */
-      if (_onDemandEdges.length) _showOnDemand(nodeId);
-
-      /* Navigation */
-      var nd = _prismNodeData[nodeId];
-      if (!nd) return;
-      if (nd.portal_href) {{
-        window.location.href = nd.portal_href;
-      }} else if (nd.obsidian_uri) {{
-        window.location.href = nd.obsidian_uri;
-      }}
+      GD.nodes.forEach(function (n) {{
+        n._dimmed = !(
+          (n.label || '').toLowerCase().indexOf(q) !== -1 ||
+          (n.id || '').toLowerCase().indexOf(q) !== -1
+        );
+      }});
+      /* trigger re-render by re-setting nodeColor accessor */
+      Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
     }});
 
-    /* Hash-based focus: graph.html#NODE-ID */
-    var hash = window.location.hash.slice(1);
-    if (hash) {{
-      var targetId = decodeURIComponent(hash);
-      network.once('stabilizationIterationsDone', function () {{
-        if (network.body.nodes[targetId]) {{
-          network.focus(targetId, {{
-            scale: 1.5,
-            animation: {{ duration: 800, easingFunction: 'easeInOutQuad' }}
-          }});
-          network.selectNodes([targetId]);
+    /* -- URL hash focus: graph.html#NODE-ID --------------------------------- */
+    var hashId = decodeURIComponent(window.location.hash.slice(1));
+    if (hashId) {{
+      var _focused = false;
+      Graph.onEngineStop(function () {{
+        if (_focused) return;
+        var node = GD.nodes.find(function (n) {{ return n.id === hashId; }});
+        if (node && node.x !== undefined) {{
+          _focused = true;
+          Graph.centerAt(node.x, node.y, 800);
+          Graph.zoom(5, 800);
         }}
       }});
     }}
-  }}
+  }})();
+  </script>
+</body>
+</html>
+"""
 
-  _attach();
-}})();
-</script>"""
 
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _community_color(community_id: str | None) -> str:
-    """Map a community_id to a color."""
     if not community_id:
         return "#888888"
     try:
@@ -197,245 +352,198 @@ def _community_color(community_id: str | None) -> str:
 
 
 def _build_obsidian_uri(vault_name: str, file_path: str) -> str:
-    """Construct an obsidian:// URI for a vault file."""
-    # Strip leading slash if present
     clean_path = file_path.lstrip("/")
     return f"obsidian://open?vault={quote(vault_name)}&file={quote(clean_path)}"
 
 
 def _is_portal_node(kind: str, data: dict) -> bool:
-    """Return True if this node should be rendered as a cross-namespace portal."""
     if kind == "context_ref":
         return True
-    # Check for cross_namespace marker (stored in metadata or as top-level attr)
     meta = data.get("metadata") or {}
     return bool(data.get("cross_namespace") or meta.get("cross_namespace"))
 
 
+def _node_val(degree: int) -> float:
+    """Map structural degree to force-graph node val (size + collision radius)."""
+    return max(1.0, math.sqrt(degree) * 3)
+
+
+# ── Public API ─────────────────────────────────────────────────────────────────
+
 def generate_html(
     graph: KnowledgeGraph,
     output_path: Path,
-    height: str = "900px",
-    width: str = "100%",
+    height: str = "900px",   # kept for API compat — ignored (canvas is fullscreen)
+    width: str = "100%",     # kept for API compat — ignored
     bg_color: str = "#1a1a2e",
     font_color: str = "#e0e0e0",
     vault_name: str | None = None,
     on_demand_relations: set[str] | None = None,
     min_degree: int = 0,
 ) -> None:
-    """Generate an interactive HTML graph visualization.
+    """Generate an interactive HTML graph visualization using force-graph.
 
     Args:
         graph: Knowledge graph to visualize.
         output_path: Where to write graph.html.
-        height: Canvas height (CSS).
-        width: Canvas width (CSS).
-        bg_color: Background color.
+        height: Ignored (canvas is always fullscreen). Kept for API compat.
+        width: Ignored. Kept for API compat.
+        bg_color: Page background color.
         font_color: Label font color.
         vault_name: Obsidian vault name for deep-link URIs.
-            When provided, clicking a note/knowledge node opens it in Obsidian.
-        on_demand_relations: Edge relation types to hide by default and show
-            only when a node is clicked (toggle). Defaults to {"mentions_symbol"}.
-            Pass an empty set to render all edges immediately.
-        min_degree: Only render nodes with degree >= this value (0 = all nodes).
-            Useful for large graphs: set to 10–20 to show only core/hub nodes.
-            Edges are included only when both endpoints survive the filter.
+        on_demand_relations: Edge relation types shown only on node click.
+            Defaults to {"mentions_symbol"}.
+        min_degree: Only render nodes with structural degree >= N (0 = all).
     """
     if on_demand_relations is None:
         on_demand_relations = {"mentions_symbol"}
 
-    # ── Pre-compute degree filter ────────────────────────────────────
-    # Degree is computed on structural edges only (excluding on_demand_relations)
-    # so that soft/noisy edges don't inflate importance scores.
+    # ── Structural degree (excludes on-demand relations) ─────────────────────
+    degree_map: dict[str, int] = {}
+    for src, tgt, edata in graph.g.edges(data=True):
+        if edata.get("relation") in on_demand_relations:
+            continue
+        degree_map[src] = degree_map.get(src, 0) + 1
+        degree_map[tgt] = degree_map.get(tgt, 0) + 1
+
     if min_degree > 0:
-        degree_map: dict[str, int] = {}
-        for src, tgt, edata in graph.g.edges(data=True):
-            if edata.get("relation") in on_demand_relations:
-                continue
-            degree_map[src] = degree_map.get(src, 0) + 1
-            degree_map[tgt] = degree_map.get(tgt, 0) + 1
-        visible_nodes: set[str] = {n for n, d in degree_map.items() if d >= min_degree}
+        visible_nodes: set[str] = {
+            n for n, d in degree_map.items() if d >= min_degree
+        }
     else:
         visible_nodes = set(graph.g.nodes())
-    net = Network(
-        height=height,
-        width=width,
-        bgcolor=bg_color,
-        font_color=font_color,
-        directed=True,
-        notebook=False,
-        select_menu=False,
-        filter_menu=False,
-        cdn_resources="remote",
-    )
 
-    # Physics: Barnes-Hut force-directed layout
-    net.barnes_hut(
-        gravity=-3000,
-        central_gravity=0.3,
-        spring_length=150,
-        spring_strength=0.05,
-        damping=0.5,
-    )
+    # ── Build nodes ──────────────────────────────────────────────────────────
+    nodes: list[dict] = []
 
-    # Collect node data for the JS bridge (obsidian_uri / portal_href)
-    prism_node_data: dict[str, dict] = {}
-
-    # ── Add nodes ────────────────────────────────────────────────────
     for node_id, data in graph.g.nodes(data=True):
         if node_id not in visible_nodes:
             continue
+
         kind = data.get("kind", "note")
         label = data.get("label", node_id)
         community_id = data.get("community_id")
         tokens = data.get("tokens", 0)
-        degree = graph.degree(node_id)
+        degree = degree_map.get(node_id, 0)
 
-        # Size: base 10, scale up with degree
-        size = 10 + degree * 3
-        # God nodes (degree > 10) get extra emphasis
-        if degree > 10:
-            size = 20 + degree * 4
-
-        # ── Portal node override ─────────────────────────────────────
         is_portal = _is_portal_node(kind, data)
+
         if is_portal:
             color = _PORTAL_COLOR
-            shape = "hexagon"
-            label_display = f"⬡ {label}"
-
-            # Build portal_href
+            label_display = f"P {label}"
             meta = data.get("metadata") or {}
             cross_ns = data.get("cross_namespace") or meta.get("cross_namespace", "")
             if isinstance(cross_ns, str) and "::" in cross_ns:
-                # Format: "target_ns::target_id"
                 target_ns, _, target_id = cross_ns.partition("::")
                 portal_href = f"../{target_ns}/graph.html#{quote(target_id)}"
             elif kind == "context_ref":
-                # Point to the source document node in the same graph
                 source_file = data.get("source_file", "")
                 portal_href = f"#{quote(source_file)}" if source_file else ""
             else:
                 portal_href = ""
-
-            if portal_href:
-                prism_node_data[node_id] = {"portal_href": portal_href}
-
+            obsidian_uri = ""
         else:
-            # ── Regular node ─────────────────────────────────────────
             label_display = label
-            if kind in _KIND_COLORS:
-                color = _KIND_COLORS[kind]
-            else:
-                color = _community_color(community_id)
-            shape = _KIND_SHAPES.get(kind, "dot")
-
-            # Build Obsidian URI for note / knowledge nodes
+            color = _KIND_COLORS.get(kind) or _community_color(community_id)
+            portal_href = ""
+            obsidian_uri = ""
             if vault_name and kind in ("note", "knowledge"):
                 source_file = data.get("source_file", "")
                 knowledge_id = data.get("knowledge_id")
                 if knowledge_id and not source_file:
-                    # Synthesize path for knowledge nodes that haven't been ingested yet
                     source_file = f"knowledge/{knowledge_id}.md"
                 if source_file:
-                    prism_node_data[node_id] = {
-                        "obsidian_uri": _build_obsidian_uri(vault_name, source_file)
-                    }
+                    obsidian_uri = _build_obsidian_uri(vault_name, source_file)
 
-        # ── Tooltip ──────────────────────────────────────────────────
         source_file = data.get("source_file", "")
-        meta = data.get("metadata") or {}
-        title = (
-            f"<b>{label}</b><br>"
-            f"kind: {kind}<br>"
-            f"degree: {degree}<br>"
-            f"tokens: {tokens}<br>"
-        )
+        meta_d = data.get("metadata") or {}
+        ls, le = meta_d.get("line_start"), meta_d.get("line_end")
+        loc = f":{ls}-{le}" if ls else ""
+        sig = meta_d.get("signature", "")
+        doc = meta_d.get("docstring", "")
+
+        tooltip_lines = [
+            f"{label} [{kind}]",
+            f"degree: {degree}  tokens: {tokens}",
+        ]
         if source_file:
-            ls, le = meta.get("line_start"), meta.get("line_end")
-            loc = f":{ls}–{le}" if ls else ""
-            title += f"<i>{source_file}{loc}</i><br>"
-        sig = meta.get("signature")
+            tooltip_lines.append(f"{source_file}{loc}")
         if sig:
-            title += f"<code>{sig[:80]}</code><br>"
-        doc = meta.get("docstring", "")
+            tooltip_lines.append(sig[:80])
         if doc:
-            title += f"{doc.split(chr(10))[0][:100]}<br>"
-        content = data.get("content", "")
-        if content and kind in ("function", "class"):
-            lines = content.split("\n")[:8]
-            snippet = "\n".join(lines)
-            title += f"<pre style='font-size:11px;background:#222;color:#eee;padding:4px'>{snippet}</pre>"
+            tooltip_lines.append(doc.split("\n")[0][:100])
 
-        net.add_node(
-            node_id,
-            label=label_display[:28],
-            title=title,
-            size=size,
-            color=color,
-            shape=shape,
-            font={"size": 12 if kind in ("note", "knowledge") else 9},
-        )
+        node_entry: dict = {
+            "id": node_id,
+            "label": label_display[:32],
+            "val": _node_val(degree),
+            "color": color,
+            "kind": kind,
+            "degree": degree,
+            "community": community_id or "",
+            "source_file": (source_file + loc) if source_file else "",
+            "sig": sig[:80] if sig else "",
+            "tooltip": "\n".join(tooltip_lines),
+        }
+        if obsidian_uri:
+            node_entry["obsidian_uri"] = obsidian_uri
+        if portal_href:
+            node_entry["portal_href"] = portal_href
 
-    # ── Add edges (split: always-visible vs on-demand) ───────────────
-    on_demand_edge_list: list[dict] = []
-    _od_edge_counter = 0
+        nodes.append(node_entry)
+
+    # ── Build links ──────────────────────────────────────────────────────────
+    links: list[dict] = []
+    od_links: list[dict] = []
 
     for source, target, data in graph.g.edges(data=True):
-        # Skip edges where either endpoint is filtered out
         if source not in visible_nodes or target not in visible_nodes:
             continue
+
         relation = data.get("relation", "?")
         confidence = data.get("confidence", "EXTRACTED")
         score = float(data.get("confidence_score", 1.0))
         weight = float(data.get("weight", 1.0))
 
-        edge_color = _EDGE_COLORS.get(confidence, "rgba(150,150,150,0.5)")
-        edge_width = 0.5 + weight * 2
-        title = f"{relation}<br>confidence: {confidence}<br>score: {score:.2f}"
-        dashes = confidence != "EXTRACTED"
-        arrows = "to" if relation in (
-            "links_to", "links_to_section", "links_to_block", "embeds"
-        ) else ""
+        edge_color = _EDGE_COLORS.get(confidence, "rgba(150,150,150,0.4)")
+        edge_width = max(0.5, weight * 1.5)
+        particles = 2 if relation in _PARTICLE_RELATIONS else 0
+
+        entry: dict = {
+            "source": source,
+            "target": target,
+            "color": edge_color,
+            "width": edge_width,
+            "particles": particles,
+            "title": f"{relation} | {confidence} | {score:.2f}",
+            "relation": relation,
+        }
 
         if relation in on_demand_relations:
-            # Store for JS on-demand rendering (not added to pyvis)
-            _od_edge_counter += 1
-            on_demand_edge_list.append({
-                "id": f"__od_{_od_edge_counter}",
-                "from": source,
-                "to": target,
-                "title": title,
-                "color": edge_color,
-                "dashes": dashes,
-                "width": edge_width,
-                "arrows": arrows,
-            })
+            entry["_onDemand"] = True
+            od_links.append(entry)
         else:
-            net.add_edge(
-                source,
-                target,
-                title=title,
-                width=edge_width,
-                color=edge_color,
-                dashes=dashes,
-                arrows=arrows,
-            )
+            links.append(entry)
 
-    # ── Save + post-process ──────────────────────────────────────────
+    all_links = links + od_links
+    graph_data = {"nodes": nodes, "links": all_links}
+
+    title = vault_name or output_path.parent.name or "PrismRag Graph"
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    net.save_graph(str(output_path))
-
-    # Inject Obsidian + portal + on-demand JS just before </body>
-    obsidian_js = _OBSIDIAN_JS_TEMPLATE.format(
-        node_data_json=json.dumps(prism_node_data, ensure_ascii=False),
-        on_demand_edges_json=json.dumps(on_demand_edge_list, ensure_ascii=False),
+    html = _HTML_TEMPLATE.format(
+        title=title,
+        bg_color=bg_color,
+        font_color=font_color,
+        node_count=len(nodes),
+        link_count=len(links),
+        od_count=len(od_links),
+        graph_data_json=json.dumps(graph_data, ensure_ascii=False, separators=(",", ":")),
     )
-    html = output_path.read_text(encoding="utf-8")
-    html = html.replace("</body>", obsidian_js + "\n</body>")
     output_path.write_text(html, encoding="utf-8")
 
     logger.info(
-        f"[visualize] saved interactive graph to {output_path} "
-        f"({len(prism_node_data)} nodes with Obsidian/portal URIs)"
+        "[visualize] saved force-graph HTML to %s "
+        "(%d nodes, %d structural + %d on-demand links)",
+        output_path, len(nodes), len(links), len(od_links),
     )

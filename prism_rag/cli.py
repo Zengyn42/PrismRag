@@ -175,19 +175,12 @@ def ingest(
         generate_report(graph, settings.report_path, vault_root=settings.vault_path)
         typer.echo(f"   → {settings.report_path}")
 
-    # ── Visualization (if pyvis is installed) ──
-    try:
-        from prism_rag.report.visualize import generate_html
-
-        viz_path = settings.data_dir / "graph.html"
-        typer.secho("\n🎨 Generating interactive visualization...", fg=typer.colors.BLUE)
-        generate_html(graph, viz_path)
-        typer.echo(f"   → {viz_path}")
-    except ImportError:
-        typer.secho(
-            "\n⏭  Visualization skipped (install pyvis: pip install prism-rag[viz])",
-            fg=typer.colors.YELLOW,
-        )
+    # ── Visualization ──
+    from prism_rag.report.visualize import generate_html
+    viz_path = settings.data_dir / "graph.html"
+    typer.secho("\n🎨 Generating interactive visualization...", fg=typer.colors.BLUE)
+    generate_html(graph, viz_path)
+    typer.echo(f"   → {viz_path}")
 
     typer.secho("\n✅ Ingest complete.", fg=typer.colors.GREEN)
 
@@ -893,13 +886,10 @@ def ingest_project(
 
     # ── Pass 4b: HTML visualization ──
     typer.secho("\n🎨 Pass 4b: Generating HTML visualization...", fg=typer.colors.BLUE)
-    try:
-        from prism_rag.report.visualize import generate_html
-        html_path = out_dir / "graph.html"
-        generate_html(graph, html_path, vault_name=vault_name or None)
-        typer.echo(f"   → {html_path}")
-    except ImportError:
-        typer.secho("   ⏭  Visualization skipped (install pyvis: pip install prism-rag[viz])", fg=typer.colors.YELLOW)
+    from prism_rag.report.visualize import generate_html
+    html_path = out_dir / "graph.html"
+    generate_html(graph, html_path, vault_name=vault_name or None)
+    typer.echo(f"   → {html_path}")
 
     typer.secho("\n✅ ingest-project complete.", fg=typer.colors.GREEN)
     typer.echo(f"   To serve: add namespace={ns!r} data_dir={out_dir!r} to PRISM_GRAPHS, then 'prism-rag serve'")
@@ -934,14 +924,7 @@ def visualize(
     vault_name = vault or None
 
     # ── Single-namespace graph ────────────────────────────────────────
-    try:
-        from prism_rag.report.visualize import generate_html
-    except ImportError as exc:
-        typer.secho(
-            f"Visualization unavailable (install pyvis: pip install prism-rag[viz]): {exc}",
-            fg=typer.colors.YELLOW, err=True,
-        )
-        raise typer.Exit(1)
+    from prism_rag.report.visualize import generate_html
 
     # Select namespace
     if namespace:
