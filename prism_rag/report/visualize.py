@@ -359,15 +359,14 @@ _HTML_TEMPLATE = """\
           ctx.stroke();
         }}
 
-        /* LOD label - fades in as user zooms */
-        if (globalScale > 0.45) {{
+        /* LOD label — only for focused/visible nodes, hidden when dimmed */
+        if (!node._dimmed && globalScale > 0.45) {{
           var fontSize = Math.min(14, Math.max(8, 11 / globalScale));
           ctx.font = fontSize + 'px monospace';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'top';
           ctx.fillStyle = '{font_color}';
-          var alpha = Math.min(1, (globalScale - 0.45) / 0.3);
-          ctx.globalAlpha = alpha * (node._dimmed ? 0.15 : 1);
+          ctx.globalAlpha = Math.min(1, (globalScale - 0.45) / 0.3);
           ctx.fillText((node.label || '').substring(0, 24), node.x, node.y + r + 2);
           ctx.globalAlpha = 1;
         }}
@@ -623,9 +622,17 @@ def generate_html(
             else:
                 portal_href = ""
             obsidian_uri = ""
-        else:
+        elif data.get("namespace") == "code" or kind in _KIND_COLORS:
+            # Code node: always use kind-based color; fallback = slate for
+            # unknown code kinds (e.g. dependency, external_module, variable)
             label_display = label
-            color = _KIND_COLORS.get(kind) or _community_color(community_id)
+            color = _KIND_COLORS.get(kind, "#5a7fa8")  # slate-blue = unknown code
+            portal_href = ""
+            obsidian_uri = ""
+        else:
+            # Doc node: community-based color
+            label_display = label
+            color = _community_color(community_id)
             portal_href = ""
             obsidian_uri = ""
             if vault_name and kind in ("note", "knowledge"):
@@ -712,13 +719,16 @@ def generate_html(
     title = vault_name or output_path.parent.name or "PrismRag Graph"
 
     # ── Community legend: collect unique communities from doc nodes ───────────
-    # Count nodes per community (doc kinds only, excluding code kinds)
-    _code_kinds = set(_KIND_COLORS.keys()) | {"context_ref"}
+    # Only count nodes whose color was assigned via _community_color()
+    # i.e. NOT code namespace and NOT portal — matches the branch above
     community_counts: dict[str, int] = {}
-    for n in nodes:
-        if n.get("kind") in _code_kinds:
+    for node_entry in nodes:
+        kind_ = node_entry.get("kind", "")
+        # Skip code nodes (they use _KIND_COLORS or slate fallback)
+        # Skip portal nodes
+        if kind_ in _KIND_COLORS or kind_ == "context_ref":
             continue
-        cid = n.get("community", "")
+        cid = node_entry.get("community", "")
         if cid:
             community_counts[cid] = community_counts.get(cid, 0) + 1
 
