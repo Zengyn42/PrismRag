@@ -176,7 +176,15 @@ class KnowledgeGraph:
         # so we pre-add empty stubs with the right default schema for dangling targets.
         for endpoint in (edge.source, edge.target):
             if endpoint not in self.g:
-                stub = Node(id=endpoint, label=endpoint, kind="note")
+                # Infer namespace from id prefix (e.g. "code::logging" → "code")
+                # so stubs carry correct metadata without relying on id heuristics elsewhere
+                ns = endpoint.split("::")[0] if "::" in endpoint else "nimbus"
+                stub = Node(
+                    id=endpoint,
+                    label=endpoint.split("::")[-1],  # readable: "logging" not "code::logging"
+                    kind="note",
+                    namespace=ns,
+                )
                 self.add_node(stub)
         self.g.add_edges_from([(edge.source, edge.target, edge.to_dict())])
 

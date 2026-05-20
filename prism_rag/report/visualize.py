@@ -622,13 +622,9 @@ def generate_html(
             else:
                 portal_href = ""
             obsidian_uri = ""
-        elif (
-            data.get("namespace") == "code"
-            or kind in _KIND_COLORS
-            or node_id.startswith("code::")
-        ):
-            # Code node: kind-based color; slate-blue fallback for unknown
-            # code kinds (external deps like logging, pathlib, typing.Dict)
+        elif data.get("namespace") == "code":
+            # Code node (real or stub): kind-based color; slate-blue fallback
+            # for external deps like logging, pathlib.Path, typing.Dict
             label_display = label
             color = _KIND_COLORS.get(kind, "#5a7fa8")  # slate-blue = unknown/external
             portal_href = ""
@@ -728,9 +724,8 @@ def generate_html(
     community_counts: dict[str, int] = {}
     for node_entry in nodes:
         kind_ = node_entry.get("kind", "")
-        nid_ = node_entry.get("id", "")
-        # Skip all code nodes (kind match, portal, or code:: id prefix)
-        if kind_ in _KIND_COLORS or kind_ == "context_ref" or nid_.startswith("code::"):
+        # Skip code nodes (namespace="code") and portal nodes
+        if kind_ in _KIND_COLORS or kind_ == "context_ref" or node_entry.get("namespace") == "code":
             continue
         cid = node_entry.get("community", "")
         if cid:
