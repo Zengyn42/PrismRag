@@ -275,6 +275,7 @@ _HTML_TEMPLATE = """\
     var _focusSet = null;      /* computed visible set: null = show all */
     var _legendColors = {{}};  /* multi-select: {{ color: true }} */
     var _legendEls = {{}};     /* {{ color: domElement }} for .active management */
+    var _clickTimer = null;    /* debounce single-click vs dbl-click */
     var _origColors = {{}};
     GD.nodes.forEach(function (n) {{ _origColors[n.id] = n.color; }});
 
@@ -467,21 +468,27 @@ _HTML_TEMPLATE = """\
       }})
       .nodeLabel(function (node) {{ return node.tooltip || node.label || node.id; }})
       .onNodeClick(function (node) {{
-        var same = (_activeNode === node.id);
-        _activeNode = same ? null : node.id;
-        _refresh();
-        if (same) {{
-          document.getElementById('info').style.display = 'none';
-        }} else {{
-          _showInfo(node);
-        }}
+        /* Delay single-click 250ms so dblclick can cancel it first */
+        if (_clickTimer) return;
+        _clickTimer = setTimeout(function () {{
+          _clickTimer = null;
+          var same = (_activeNode === node.id);
+          _activeNode = same ? null : node.id;
+          _refresh();
+          if (same) {{
+            document.getElementById('info').style.display = 'none';
+          }} else {{
+            _showInfo(node);
+          }}
+        }}, 250);
       }})
       .onNodeRightClick(function (node) {{
         if (node.portal_href) window.location.href = node.portal_href;
         else if (node.obsidian_uri) window.open(node.obsidian_uri, '_blank');
       }})
       .onNodeDblClick(function (node) {{
-        /* Double-click: toggle the legend entry for this node's color */
+        /* Cancel pending single-click, then toggle legend for this node's color */
+        if (_clickTimer) {{ clearTimeout(_clickTimer); _clickTimer = null; }}
         var color = _origColors[node.id];
         if (!color) return;
         var el = document.querySelector('.leg-filter[data-color="' + color + '"]');
