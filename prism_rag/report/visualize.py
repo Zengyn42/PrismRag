@@ -210,7 +210,6 @@ _HTML_TEMPLATE = """\
 
         <div class="leg-section">Controls</div>
         <div class="leg-row"><kbd>click</kbd>&nbsp;focus node</div>
-        <div class="leg-row"><kbd>dbl-click</kbd>&nbsp;select type in legend</div>
         <div class="leg-row"><kbd>click bg</kbd>&nbsp;clear node focus</div>
         <div class="leg-row"><kbd>right-click</kbd>&nbsp;open Obsidian</div>
         <div class="leg-row"><kbd>Esc</kbd>&nbsp;reset everything</div>
@@ -479,13 +478,6 @@ _HTML_TEMPLATE = """\
       .onNodeRightClick(function (node) {{
         if (node.portal_href) window.location.href = node.portal_href;
         else if (node.obsidian_uri) window.open(node.obsidian_uri, '_blank');
-      }})
-      .onNodeDblClick(function (node) {{
-        /* Double-click: toggle the legend entry for this node's color */
-        var color = _origColors[node.id];
-        if (!color) return;
-        var el = document.querySelector('.leg-filter[data-color="' + color + '"]');
-        if (el) _toggleLegend(color, el);
       }})
       .onBackgroundClick(function () {{
         /* Background click: clear node focus only, keep legend selections */
