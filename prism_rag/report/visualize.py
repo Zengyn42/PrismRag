@@ -120,8 +120,24 @@ _HTML_TEMPLATE = """\
       user-select: none;
     }}
     #legend-header:hover {{ color: #fff; }}
-    #legend-body {{ padding: 0 12px 10px; display: block; }}
+    #legend-body {{
+      padding: 0 12px 10px; display: block;
+      max-height: calc(100vh - 120px); overflow-y: auto;
+      scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.15) transparent;
+    }}
+    #legend-body::-webkit-scrollbar {{ width: 4px; }}
+    #legend-body::-webkit-scrollbar-thumb {{ background: rgba(255,255,255,0.15); border-radius: 2px; }}
     #legend-body.collapsed {{ display: none; }}
+    #btn-reset {{
+      pointer-events: all;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: rgba(255,255,255,0.6); font-size: 11px;
+      padding: 4px 10px; border-radius: 5px; cursor: pointer;
+      transition: background .12s, color .12s;
+      font-family: monospace; width: 100%;
+    }}
+    #btn-reset:hover {{ background: rgba(255,80,80,0.25); color: #fff; border-color: rgba(255,100,100,0.4); }}
     .leg-section {{
       font-size: 10px; color: rgba(255,255,255,0.3);
       letter-spacing: .08em; text-transform: uppercase;
@@ -190,6 +206,15 @@ _HTML_TEMPLATE = """\
       </div>
       <div id="legend-body">
 
+        <button id="btn-reset">⟳ Reset all</button>
+
+        <div class="leg-section">Controls</div>
+        <div class="leg-row"><kbd>click</kbd>&nbsp;focus node</div>
+        <div class="leg-row"><kbd>click bg</kbd>&nbsp;clear node focus</div>
+        <div class="leg-row"><kbd>right-click</kbd>&nbsp;open Obsidian</div>
+        <div class="leg-row"><kbd>Esc</kbd>&nbsp;reset everything</div>
+        <div class="leg-row"><kbd>WASD</kbd>&nbsp;pan &nbsp;<kbd>+</kbd><kbd>-</kbd>&nbsp;zoom</div>
+
         <div class="leg-section">Node — Code</div>
         <div class="leg-row leg-filter" data-color="#4363d8"><span class="swatch" style="background:#4363d8"></span>function</div>
         <div class="leg-row leg-filter" data-color="#911eb4"><span class="swatch" style="background:#911eb4"></span>class</div>
@@ -222,12 +247,6 @@ _HTML_TEMPLATE = """\
         <div class="leg-row" style="color:rgba(255,255,255,0.45);font-size:10px">&#9654; particles = wiki-link</div>
         <div class="leg-row" style="color:rgba(255,200,80,0.6);font-size:10px">click node = mentions_symbol</div>
 
-        <div class="leg-section">Controls</div>
-        <div class="leg-row"><kbd>click</kbd>&nbsp;focus node</div>
-        <div class="leg-row"><kbd>click bg</kbd>&nbsp;/ <kbd>Esc</kbd>&nbsp;reset</div>
-        <div class="leg-row"><kbd>right-click</kbd>&nbsp;open Obsidian</div>
-        <div class="leg-row"><kbd>WASD</kbd>&nbsp;pan</div>
-        <div class="leg-row"><kbd>+</kbd>&nbsp;<kbd>-</kbd>&nbsp;zoom</div>
 
       </div>
     </div>
@@ -492,6 +511,16 @@ _HTML_TEMPLATE = """\
       }}
       Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
       Graph.linkVisibility(_linkVisible);
+    }});
+
+    /* -- Reset button ------------------------------------------------------- */
+    document.getElementById('btn-reset').addEventListener('click', function (e) {{
+      e.stopPropagation();  /* don't trigger legend collapse */
+      _activeNode = null;
+      _clearAllLegend();
+      _refresh();
+      document.getElementById('info').style.display = 'none';
+      document.getElementById('search').value = '';
     }});
 
     /* -- Legend toggle ------------------------------------------------------ */
