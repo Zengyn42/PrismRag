@@ -251,15 +251,15 @@ _HTML_TEMPLATE = """\
   <script>
   (function () {{
     var GD = {graph_data_json};
-    var _activeNode = null;       /* currently clicked node id */
-    var _focusSet = null;         /* Set of visible node ids in focus mode (null = show all) */
-    var _legendFilter = null;     /* active legend color filter */
-    var _legendActiveEl = null;   /* DOM element with .active class */
+    var _activeNode = null;    /* clicked node id (ego-graph focus) */
+    var _focusSet = null;      /* computed visible set: null = show all */
+    var _legendColors = {{}};  /* multi-select: {{ color: true }} */
+    var _legendEls = {{}};     /* {{ color: domElement }} for .active management */
     var _origColors = {{}};
     GD.nodes.forEach(function (n) {{ _origColors[n.id] = n.color; }});
 
-    /* -- Adjacency map (built from raw string ids before force-graph resolves them) -- */
-    var _adj = {{}};  /* nodeId -> {{neighborId: true}} — structural edges only */
+    /* -- Adjacency map (raw string ids, built before force-graph resolves them) */
+    var _adj = {{}};
     GD.links.forEach(function (l) {{
       if (l._onDemand) return;
       var s = l.source, t = l.target;
@@ -269,32 +269,56 @@ _HTML_TEMPLATE = """\
       _adj[t][s] = true;
     }});
 
-    /* -- Legend filter: show all nodes of a color + their neighbors -------- */
-    function _clearLegendFilter() {{
-      _legendFilter = null;
-      if (_legendActiveEl) {{ _legendActiveEl.classList.remove('active'); _legendActiveEl = null; }}
+    /* -- Compute focus set: union of legend colors + node ego-graph --------- */
+    function _computeFocusSet() {{
+      var hasLegend = Object.keys(_legendColors).length > 0;
+      var hasNode   = !!_activeNode;
+      if (!hasLegend && !hasNode) return null;  /* show everything */
+
+      var set = {{}};
+      if (hasLegend) {{
+        GD.nodes.forEach(function (n) {{
+          if (_legendColors[_origColors[n.id]]) set[n.id] = true;
+        }});
+      }}
+      if (hasNode) {{
+        set[_activeNode] = true;
+        Object.keys(_adj[_activeNode] || {{}}).forEach(function (nid) {{
+          set[nid] = true;
+        }});
+      }}
+      return set;
     }}
 
-    function _applyLegendFilter(color, el) {{
-      if (_legendFilter === color) {{
-        _clearLegendFilter();
-        _applyFocus(null);
-        return;
-      }}
-      _clearLegendFilter();
-      _legendFilter = color;
-      _legendActiveEl = el;
-      el.classList.add('active');
-
-      /* Build focus set: only nodes of this exact color (no neighbor expansion) */
-      _activeNode = null;
-      _focusSet = {{}};
-      GD.nodes.forEach(function (n) {{
-        if (_origColors[n.id] === color) _focusSet[n.id] = true;
-      }});
-      GD.nodes.forEach(function (n) {{ n._dimmed = !_focusSet[n.id]; }});
+    /* -- Apply computed focus to the graph ---------------------------------- */
+    function _refresh() {{
+      _focusSet = _computeFocusSet();
+      GD.nodes.forEach(function (n) {{ n._dimmed = _focusSet ? !_focusSet[n.id] : false; }});
       Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
       Graph.linkVisibility(_linkVisible);
+    }}
+
+    /* -- Clear all legend selections ---------------------------------------- */
+    function _clearAllLegend() {{
+      Object.keys(_legendEls).forEach(function (c) {{
+        _legendEls[c].classList.remove('active');
+      }});
+      _legendColors = {{}};
+      _legendEls = {{}};
+    }}
+
+    /* -- Toggle a legend color on/off --------------------------------------- */
+    function _toggleLegend(color, el) {{
+      if (_legendColors[color]) {{
+        delete _legendColors[color];
+        el.classList.remove('active');
+        delete _legendEls[color];
+      }} else {{
+        _legendColors[color] = true;
+        el.classList.add('active');
+        _legendEls[color] = el;
+      }}
+      _refresh();
     }}
 
     /* Legend click delegation */
@@ -302,32 +326,15 @@ _HTML_TEMPLATE = """\
       var row = e.target.closest('.leg-filter');
       if (!row) return;
       var color = row.getAttribute('data-color');
-      if (color) _applyLegendFilter(color, row);
+      if (color) _toggleLegend(color, row);
     }});
-
-    /* -- Focus: show only clicked node + direct neighbors ------------------ */
-    function _applyFocus(nodeId) {{
-      if (!nodeId) {{
-        _focusSet = null;
-        GD.nodes.forEach(function (n) {{ n._dimmed = false; }});
-      }} else {{
-        _focusSet = {{}};
-        _focusSet[nodeId] = true;
-        var neighbors = _adj[nodeId] || {{}};
-        Object.keys(neighbors).forEach(function (nid) {{ _focusSet[nid] = true; }});
-        GD.nodes.forEach(function (n) {{ n._dimmed = !_focusSet[n.id]; }});
-      }}
-      /* Re-set nodeColor accessor to trigger a canvas repaint */
-      Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
-      Graph.linkVisibility(_linkVisible);
-    }}
 
     /* -- Link visibility callback ----------------------------------------- */
     function _linkVisible(link) {{
       var s = typeof link.source === 'object' ? link.source.id : link.source;
       var t = typeof link.target === 'object' ? link.target.id : link.target;
 
-      /* Focus mode: only show edges between focused nodes */
+      /* Focus mode: hide edges where either endpoint is dimmed */
       if (_focusSet && (!_focusSet[s] || !_focusSet[t])) return false;
 
       /* On-demand edges: only when their node is the active node */
@@ -442,7 +449,7 @@ _HTML_TEMPLATE = """\
       .onNodeClick(function (node) {{
         var same = (_activeNode === node.id);
         _activeNode = same ? null : node.id;
-        _applyFocus(_activeNode);
+        _refresh();
         if (same) {{
           document.getElementById('info').style.display = 'none';
         }} else {{
@@ -454,9 +461,9 @@ _HTML_TEMPLATE = """\
         else if (node.obsidian_uri) window.open(node.obsidian_uri, '_blank');
       }})
       .onBackgroundClick(function () {{
+        /* Background click: clear node focus only, keep legend selections */
         _activeNode = null;
-        _clearLegendFilter();
-        _applyFocus(null);
+        _refresh();
         document.getElementById('info').style.display = 'none';
       }});
 
@@ -465,21 +472,22 @@ _HTML_TEMPLATE = """\
       Graph.width(window.innerWidth).height(window.innerHeight);
     }});
 
-    /* -- Search: highlight matching nodes (clears focus) ------------------- */
+    /* -- Search: highlights matching nodes, clears all focus/legend -------- */
     document.getElementById('search').addEventListener('input', function (e) {{
       var q = e.target.value.toLowerCase().trim();
-      /* Clear focus when searching */
       _activeNode = null;
-      _focusSet = null;
+      _clearAllLegend();
       document.getElementById('info').style.display = 'none';
       if (!q) {{
+        _focusSet = null;
         GD.nodes.forEach(function (n) {{ n._dimmed = false; }});
       }} else {{
+        _focusSet = {{}};
         GD.nodes.forEach(function (n) {{
-          n._dimmed = !(
-            (n.label || '').toLowerCase().indexOf(q) !== -1 ||
-            (n.id || '').toLowerCase().indexOf(q) !== -1
-          );
+          var match = (n.label || '').toLowerCase().indexOf(q) !== -1 ||
+                      (n.id || '').toLowerCase().indexOf(q) !== -1;
+          if (match) _focusSet[n.id] = true;
+          n._dimmed = !match;
         }});
       }}
       Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
@@ -533,11 +541,11 @@ _HTML_TEMPLATE = """\
         return;
       }}
 
-      /* Escape: clear focus + legend filter */
+      /* Escape: clear everything — node focus + all legend selections */
       if (e.key === 'Escape') {{
         _activeNode = null;
-        _clearLegendFilter();
-        _applyFocus(null);
+        _clearAllLegend();
+        _refresh();
         document.getElementById('info').style.display = 'none';
         return;
       }}
