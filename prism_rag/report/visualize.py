@@ -209,7 +209,9 @@ _HTML_TEMPLATE = """\
         <button id="btn-reset">⟳ Reset all</button>
 
         <div class="leg-section">Controls</div>
-        <div class="leg-row"><kbd>click</kbd>&nbsp;focus node</div>
+        <div class="leg-row"><kbd>click ×1</kbd>&nbsp;focus node</div>
+        <div class="leg-row"><kbd>click ×2</kbd>&nbsp;+ select legend type</div>
+        <div class="leg-row"><kbd>click ×3</kbd>&nbsp;clear node, keep legend</div>
         <div class="leg-row"><kbd>click bg</kbd>&nbsp;clear node focus</div>
         <div class="leg-row"><kbd>right-click</kbd>&nbsp;open Obsidian</div>
         <div class="leg-row"><kbd>Esc</kbd>&nbsp;reset everything</div>
@@ -274,6 +276,7 @@ _HTML_TEMPLATE = """\
     var _focusSet = null;      /* computed visible set: null = show all */
     var _legendColors = {{}};  /* multi-select: {{ color: true }} */
     var _legendEls = {{}};     /* {{ color: domElement }} for .active management */
+    var _nodeClickCount = 0;   /* consecutive clicks on _activeNode: 1=focus 2=+legend 3=clear node */
     var _origColors = {{}};
     GD.nodes.forEach(function (n) {{ _origColors[n.id] = n.color; }});
 
@@ -466,13 +469,29 @@ _HTML_TEMPLATE = """\
       }})
       .nodeLabel(function (node) {{ return node.tooltip || node.label || node.id; }})
       .onNodeClick(function (node) {{
-        var same = (_activeNode === node.id);
-        _activeNode = same ? null : node.id;
-        _refresh();
-        if (same) {{
-          document.getElementById('info').style.display = 'none';
-        }} else {{
+        if (_activeNode !== node.id) {{
+          /* Different node: click 1 — ego focus */
+          _activeNode = node.id;
+          _nodeClickCount = 1;
+          _refresh();
           _showInfo(node);
+        }} else {{
+          _nodeClickCount++;
+          if (_nodeClickCount === 2) {{
+            /* Click 2: also select this node's legend type */
+            var color = _origColors[node.id];
+            if (color) {{
+              var el = document.querySelector('.leg-filter[data-color="' + color + '"]');
+              if (el && !_legendColors[color]) _toggleLegend(color, el);
+            }}
+            _showInfo(node);
+          }} else {{
+            /* Click 3+: deselect node, keep legend */
+            _activeNode = null;
+            _nodeClickCount = 0;
+            _refresh();
+            document.getElementById('info').style.display = 'none';
+          }}
         }}
       }})
       .onNodeRightClick(function (node) {{
@@ -482,6 +501,7 @@ _HTML_TEMPLATE = """\
       .onBackgroundClick(function () {{
         /* Background click: clear node focus only, keep legend selections */
         _activeNode = null;
+        _nodeClickCount = 0;
         _refresh();
         document.getElementById('info').style.display = 'none';
       }});
@@ -573,6 +593,7 @@ _HTML_TEMPLATE = """\
       /* Escape: clear everything — node focus + all legend selections */
       if (e.key === 'Escape') {{
         _activeNode = null;
+        _nodeClickCount = 0;
         _clearAllLegend();
         _refresh();
         document.getElementById('info').style.display = 'none';
