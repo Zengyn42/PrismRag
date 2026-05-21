@@ -199,11 +199,21 @@ _HTML_TEMPLATE = """\
 
         <div class="leg-section">Node — Docs</div>
         {community_legend_html}
-        <div class="leg-row" style="color:rgba(255,255,255,0.35);font-size:10px;margin-top:2px">color = cluster (Leiden)</div>
+        <div class="leg-row" style="color:rgba(255,255,255,0.35);font-size:10px;margin-top:2px;line-height:1.6">
+          Leiden: auto-detected topic clusters.<br>Same color = semantically related docs.
+        </div>
 
-        <div class="leg-section">Node — Other</div>
-        <div class="leg-row leg-filter" data-color="#F5A623"><span class="swatch" style="background:#F5A623"></span>portal / cross-ref</div>
-        <div class="leg-row" style="color:rgba(255,255,255,0.45);font-size:10px">size = degree</div>
+        <div class="leg-section">Node — Portal</div>
+        <div class="leg-row leg-filter" data-color="#F5A623"><span class="swatch" style="background:#F5A623"></span>cross-namespace ref</div>
+        <div class="leg-row" style="color:rgba(255,255,255,0.35);font-size:10px;line-height:1.6">
+          Links to a node in another graph<br>(only in federated multi-project views)
+        </div>
+
+        <div class="leg-section">Visual Encoding</div>
+        <div class="leg-row" style="color:rgba(255,255,255,0.55);font-size:10px;line-height:1.7">
+          <span style="color:rgba(255,255,255,0.8)">size</span> = connections (degree)<br>
+          <span style="color:rgba(255,255,255,0.8)">tokens</span> = content length for RAG
+        </div>
 
         <div class="leg-section">Edges</div>
         <div class="leg-row"><span class="swatch-line" style="background:rgba(200,200,200,0.6)"></span>structural</div>
@@ -430,7 +440,6 @@ _HTML_TEMPLATE = """\
       }})
       .nodeLabel(function (node) {{ return node.tooltip || node.label || node.id; }})
       .onNodeClick(function (node) {{
-        _clearLegendFilter();          /* legend filter yields to node focus */
         var same = (_activeNode === node.id);
         _activeNode = same ? null : node.id;
         _applyFocus(_activeNode);
@@ -705,7 +714,7 @@ def generate_html(
 
         tooltip_lines = [
             f"{label} [{kind}]",
-            f"degree: {degree}",
+            f"degree: {degree}  tokens: {tokens}",
         ]
         if source_file:
             tooltip_lines.append(f"{source_file}{loc}")
