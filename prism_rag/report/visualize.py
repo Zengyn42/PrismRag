@@ -276,16 +276,11 @@ _HTML_TEMPLATE = """\
       _legendActiveEl = el;
       el.classList.add('active');
 
-      /* Build focus set: all nodes of this color + their direct neighbors */
+      /* Build focus set: only nodes of this exact color (no neighbor expansion) */
       _activeNode = null;
       _focusSet = {{}};
       GD.nodes.forEach(function (n) {{
-        if (_origColors[n.id] === color) {{
-          _focusSet[n.id] = true;
-          Object.keys(_adj[n.id] || {{}}).forEach(function (nbr) {{
-            _focusSet[nbr] = true;
-          }});
-        }}
+        if (_origColors[n.id] === color) _focusSet[n.id] = true;
       }});
       GD.nodes.forEach(function (n) {{ n._dimmed = !_focusSet[n.id]; }});
       Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
@@ -710,7 +705,7 @@ def generate_html(
 
         tooltip_lines = [
             f"{label} [{kind}]",
-            f"degree: {degree}  tokens: {tokens}",
+            f"degree: {degree}",
         ]
         if source_file:
             tooltip_lines.append(f"{source_file}{loc}")
@@ -776,31 +771,28 @@ def generate_html(
 
     title = vault_name or output_path.parent.name or "PrismRag Graph"
 
-    # ── Community legend: collect unique communities from doc nodes ───────────
-    # Only count nodes whose color was assigned via _community_color()
-    # i.e. NOT code namespace and NOT portal — matches the branch above
-    community_counts: dict[str, int] = {}
+    # ── Community legend: group doc nodes by rendered color ──────────────────
+    # Multiple community_ids may map to the same color (12-color palette wraps
+    # over 95 communities). Count by actual color so numbers reflect real sizes.
+    color_counts: dict[str, int] = {}
     for node_entry in nodes:
         kind_ = node_entry.get("kind", "")
-        # Skip code nodes (namespace="code") and portal nodes
         nid_ = node_entry.get("id", "")
-        if kind_ in _KIND_COLORS or kind_ == "context_ref" or node_entry.get("namespace") == "code" or nid_.startswith("code::"):
+        if kind_ in _KIND_COLORS or kind_ == "context_ref" or nid_.startswith("code::"):
             continue
-        cid = node_entry.get("community", "")
-        if cid:
-            community_counts[cid] = community_counts.get(cid, 0) + 1
+        c = node_entry.get("color", "")
+        if c and c != "#888888":
+            color_counts[c] = color_counts.get(c, 0) + 1
 
-    # Sort by count desc, take top 8 to keep legend compact
-    top_communities = sorted(community_counts, key=lambda c: -community_counts[c])[:8]
+    # Top 8 colors by doc node count
+    top_colors = sorted(color_counts, key=lambda c: -color_counts[c])[:8]
     community_legend_rows = []
-    for cid in top_communities:
-        color = _community_color(cid)
-        count = community_counts[cid]
-        label = f"cluster {cid.split('_')[-1]} ({count} nodes)"
+    for color in top_colors:
+        count = color_counts[color]
         community_legend_rows.append(
             f'<div class="leg-row leg-filter" data-color="{color}">'
             f'<span class="swatch" style="background:{color}"></span>'
-            f'{label}'
+            f'doc group ({count} nodes)'
             f'</div>'
         )
     community_legend_html = "\n        ".join(community_legend_rows) if community_legend_rows else ""
