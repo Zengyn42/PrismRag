@@ -131,6 +131,17 @@ _HTML_TEMPLATE = """\
       display: flex; align-items: center; gap: 7px;
       line-height: 1.9; color: rgba(255,255,255,0.65);
     }}
+    .leg-filter {{
+      cursor: pointer; border-radius: 4px;
+      padding: 0 4px; margin: 0 -4px;
+      transition: background .12s, color .12s;
+    }}
+    .leg-filter:hover {{ background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.9); }}
+    .leg-filter.active {{
+      background: rgba(255,255,255,0.13);
+      color: #fff;
+      outline: 1px solid rgba(255,255,255,0.25);
+    }}
     .swatch {{
       width: 10px; height: 10px; border-radius: 50%;
       flex-shrink: 0; display: inline-block;
@@ -180,17 +191,18 @@ _HTML_TEMPLATE = """\
       <div id="legend-body">
 
         <div class="leg-section">Node — Code</div>
-        <div class="leg-row"><span class="swatch" style="background:#4363d8"></span>function</div>
-        <div class="leg-row"><span class="swatch" style="background:#911eb4"></span>class</div>
-        <div class="leg-row"><span class="swatch" style="background:#f58231"></span>module</div>
-        <div class="leg-row"><span class="swatch" style="background:#42d4f4"></span>flow</div>
+        <div class="leg-row leg-filter" data-color="#4363d8"><span class="swatch" style="background:#4363d8"></span>function</div>
+        <div class="leg-row leg-filter" data-color="#911eb4"><span class="swatch" style="background:#911eb4"></span>class</div>
+        <div class="leg-row leg-filter" data-color="#f58231"><span class="swatch" style="background:#f58231"></span>module</div>
+        <div class="leg-row leg-filter" data-color="#42d4f4"><span class="swatch" style="background:#42d4f4"></span>flow</div>
+        <div class="leg-row leg-filter" data-color="#5a7fa8"><span class="swatch" style="background:#5a7fa8"></span>external / stdlib</div>
 
         <div class="leg-section">Node — Docs</div>
         {community_legend_html}
         <div class="leg-row" style="color:rgba(255,255,255,0.35);font-size:10px;margin-top:2px">color = cluster (Leiden)</div>
 
         <div class="leg-section">Node — Other</div>
-        <div class="leg-row"><span class="swatch" style="background:#F5A623"></span>portal / cross-ref</div>
+        <div class="leg-row leg-filter" data-color="#F5A623"><span class="swatch" style="background:#F5A623"></span>portal / cross-ref</div>
         <div class="leg-row" style="color:rgba(255,255,255,0.45);font-size:10px">size = degree</div>
 
         <div class="leg-section">Edges</div>
@@ -231,6 +243,8 @@ _HTML_TEMPLATE = """\
     var GD = {graph_data_json};
     var _activeNode = null;       /* currently clicked node id */
     var _focusSet = null;         /* Set of visible node ids in focus mode (null = show all) */
+    var _legendFilter = null;     /* active legend color filter */
+    var _legendActiveEl = null;   /* DOM element with .active class */
     var _origColors = {{}};
     GD.nodes.forEach(function (n) {{ _origColors[n.id] = n.color; }});
 
@@ -243,6 +257,47 @@ _HTML_TEMPLATE = """\
       if (!_adj[t]) _adj[t] = {{}};
       _adj[s][t] = true;
       _adj[t][s] = true;
+    }});
+
+    /* -- Legend filter: show all nodes of a color + their neighbors -------- */
+    function _clearLegendFilter() {{
+      _legendFilter = null;
+      if (_legendActiveEl) {{ _legendActiveEl.classList.remove('active'); _legendActiveEl = null; }}
+    }}
+
+    function _applyLegendFilter(color, el) {{
+      if (_legendFilter === color) {{
+        _clearLegendFilter();
+        _applyFocus(null);
+        return;
+      }}
+      _clearLegendFilter();
+      _legendFilter = color;
+      _legendActiveEl = el;
+      el.classList.add('active');
+
+      /* Build focus set: all nodes of this color + their direct neighbors */
+      _activeNode = null;
+      _focusSet = {{}};
+      GD.nodes.forEach(function (n) {{
+        if (_origColors[n.id] === color) {{
+          _focusSet[n.id] = true;
+          Object.keys(_adj[n.id] || {{}}).forEach(function (nbr) {{
+            _focusSet[nbr] = true;
+          }});
+        }}
+      }});
+      GD.nodes.forEach(function (n) {{ n._dimmed = !_focusSet[n.id]; }});
+      Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
+      Graph.linkVisibility(_linkVisible);
+    }}
+
+    /* Legend click delegation */
+    document.getElementById('legend-body').addEventListener('click', function (e) {{
+      var row = e.target.closest('.leg-filter');
+      if (!row) return;
+      var color = row.getAttribute('data-color');
+      if (color) _applyLegendFilter(color, row);
     }});
 
     /* -- Focus: show only clicked node + direct neighbors ------------------ */
@@ -380,6 +435,7 @@ _HTML_TEMPLATE = """\
       }})
       .nodeLabel(function (node) {{ return node.tooltip || node.label || node.id; }})
       .onNodeClick(function (node) {{
+        _clearLegendFilter();          /* legend filter yields to node focus */
         var same = (_activeNode === node.id);
         _activeNode = same ? null : node.id;
         _applyFocus(_activeNode);
@@ -390,12 +446,12 @@ _HTML_TEMPLATE = """\
         }}
       }})
       .onNodeRightClick(function (node) {{
-        /* Right-click / long-press: navigate to Obsidian or portal */
         if (node.portal_href) window.location.href = node.portal_href;
         else if (node.obsidian_uri) window.open(node.obsidian_uri, '_blank');
       }})
       .onBackgroundClick(function () {{
         _activeNode = null;
+        _clearLegendFilter();
         _applyFocus(null);
         document.getElementById('info').style.display = 'none';
       }});
@@ -473,9 +529,10 @@ _HTML_TEMPLATE = """\
         return;
       }}
 
-      /* Escape: clear focus */
+      /* Escape: clear focus + legend filter */
       if (e.key === 'Escape') {{
         _activeNode = null;
+        _clearLegendFilter();
         _applyFocus(null);
         document.getElementById('info').style.display = 'none';
         return;
@@ -741,7 +798,7 @@ def generate_html(
         count = community_counts[cid]
         label = f"cluster {cid.split('_')[-1]} ({count} nodes)"
         community_legend_rows.append(
-            f'<div class="leg-row">'
+            f'<div class="leg-row leg-filter" data-color="{color}">'
             f'<span class="swatch" style="background:{color}"></span>'
             f'{label}'
             f'</div>'
