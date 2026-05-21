@@ -622,11 +622,12 @@ def generate_html(
             else:
                 portal_href = ""
             obsidian_uri = ""
-        elif data.get("namespace") == "code":
-            # Code node (real or stub): kind-based color; slate-blue fallback
-            # for external deps like logging, pathlib.Path, typing.Dict
+        elif data.get("namespace") == "code" or node_id.startswith("code::"):
+            # Code node (real or stub). namespace="code" is set by graph.py for new
+            # ingests; node_id prefix is the fallback for graphs ingested before fix.
+            # Slate-blue for unknown/external code kinds (logging, pathlib, typing etc.)
             label_display = label
-            color = _KIND_COLORS.get(kind, "#5a7fa8")  # slate-blue = unknown/external
+            color = _KIND_COLORS.get(kind, "#5a7fa8")
             portal_href = ""
             obsidian_uri = ""
         else:
@@ -725,7 +726,8 @@ def generate_html(
     for node_entry in nodes:
         kind_ = node_entry.get("kind", "")
         # Skip code nodes (namespace="code") and portal nodes
-        if kind_ in _KIND_COLORS or kind_ == "context_ref" or node_entry.get("namespace") == "code":
+        nid_ = node_entry.get("id", "")
+        if kind_ in _KIND_COLORS or kind_ == "context_ref" or node_entry.get("namespace") == "code" or nid_.startswith("code::"):
             continue
         cid = node_entry.get("community", "")
         if cid:
