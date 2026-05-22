@@ -841,7 +841,9 @@ def generate_html(
     # ── Community legend: group doc nodes by rendered color ──────────────────
     # Multiple community_ids may map to the same color (12-color palette wraps
     # over 95 communities). Count by actual color so numbers reflect real sizes.
+    # For each color we pick the hub node (highest degree) as the cluster name.
     color_counts: dict[str, int] = {}
+    color_hub: dict[str, tuple[int, str]] = {}  # color → (max_degree, hub_label)
     for node_entry in nodes:
         kind_ = node_entry.get("kind", "")
         nid_ = node_entry.get("id", "")
@@ -850,16 +852,25 @@ def generate_html(
         c = node_entry.get("color", "")
         if c and c != "#888888":
             color_counts[c] = color_counts.get(c, 0) + 1
+            deg = node_entry.get("degree", 1)  # raw degree for hub selection
+            label = node_entry.get("label") or node_entry.get("id", "")
+            # Strip namespace prefix for display (e.g. "nimbus::Foo" → "Foo")
+            if "::" in label:
+                label = label.split("::")[-1]
+            prev_deg, _ = color_hub.get(c, (-1, ""))
+            if deg > prev_deg:
+                color_hub[c] = (deg, label)
 
     # Top 8 colors by doc node count
     top_colors = sorted(color_counts, key=lambda c: -color_counts[c])[:8]
     community_legend_rows = []
     for color in top_colors:
         count = color_counts[color]
+        hub_label = color_hub.get(color, (0, "doc group"))[1] or "doc group"
         community_legend_rows.append(
             f'<div class="leg-row leg-filter" data-color="{color}">'
             f'<span class="swatch" style="background:{color}"></span>'
-            f'doc group ({count} nodes)'
+            f'{hub_label} ({count})'
             f'</div>'
         )
     community_legend_html = "\n        ".join(community_legend_rows) if community_legend_rows else ""
