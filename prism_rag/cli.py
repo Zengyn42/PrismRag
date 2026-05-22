@@ -39,12 +39,20 @@ app = typer.Typer(
 )
 
 
-def _resolve_settings(vault: Path | None, output: Path | None) -> PrismRagSettings:
+def _resolve_settings(
+    vault: Path | None,
+    output: Path | None,
+    namespace: str = "",
+) -> PrismRagSettings:
     settings = PrismRagSettings()
     if vault is not None:
         settings.vault_path = vault.expanduser().resolve()
     if output is not None:
         settings.data_dir = output.expanduser().resolve()
+    elif vault is not None:
+        # Default: store under the vault itself, not under PrismRag's cwd
+        sub = namespace if namespace else "default"
+        settings.data_dir = settings.vault_path / ".prismrag" / sub
     return settings
 
 
@@ -69,12 +77,8 @@ def ingest(
 
     if namespace and output is not None:
         output = output / namespace
-    elif namespace:
-        # Apply namespace subdirectory to the default output path
-        settings_tmp = PrismRagSettings()
-        output = settings_tmp.data_dir / namespace
 
-    settings = _resolve_settings(vault, output)
+    settings = _resolve_settings(vault, output, namespace=namespace)
 
     typer.secho(f"📂 Vault:  {settings.vault_path}", fg=typer.colors.CYAN)
     typer.secho(f"📁 Output: {settings.data_dir}", fg=typer.colors.CYAN)
@@ -418,7 +422,7 @@ def ingest_code(
         raise typer.Exit(1)
 
     settings = PrismRagSettings()
-    out_dir = (data_dir or settings.data_dir / namespace).expanduser().resolve()
+    out_dir = (data_dir or repo / ".prismrag" / namespace).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     graph_path = out_dir / "graph.json"
 
@@ -800,7 +804,7 @@ def ingest_project(
 
     ns = namespace or repo.name
     settings = PrismRagSettings()
-    out_dir = (data_dir or settings.data_dir / ns).expanduser().resolve()
+    out_dir = (data_dir or repo / ".prismrag" / ns).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     typer.secho(f"📂 Repo:      {repo}", fg=typer.colors.CYAN)
