@@ -1,9 +1,9 @@
 # PrismRag
 
 > 无垠智穹 · 图优先 RAG 系统 · Zengyn42
-> 从 [NimbusVault](https://github.com/Zengyn42/NimbusVault)（Obsidian 知识库）构建知识图谱，通过 MCP Server 对外提供基于图遍历的语义检索。
+> 从 Markdown vault 和代码库构建知识图谱，通过 MCP Server 对外提供基于图遍历的语义检索。
 
-**状态**：🚧 v4.0 设计中（graphify 流派），骨架已建，实现待开发
+**状态**：✅ v5.7 完成，准备进入 v6.0（联邦元图）
 
 ---
 
@@ -11,156 +11,98 @@
 
 > **Clustering is graph-topology-based. Retrieval is graph traversal. Embedding only builds edges.**
 
-PrismRag v4.0 借鉴 [safishamsi/graphify](https://github.com/safishamsi/graphify) 的图优先架构，同时保留 Gemini Embedding 2 作为**索引时的相似性边生成器**和**多模态桥**。
+和传统 RAG 的区别：
 
-**和传统 RAG 的区别**：
-
-| 维度 | 传统 RAG | PrismRag v4.0 |
+| 维度 | 传统 RAG | PrismRag |
 |---|---|---|
-| 主存储 | 向量数据库 | NetworkX 图 (+ JSON 序列化) |
+| 主存储 | 向量数据库 | NetworkX 图 + JSON |
 | 主检索 | 向量相似度搜索 | 图遍历 (BFS / DFS) |
-| Embedding 角色 | Query-time 核心路径 | **Index-time only**（生成相似边 + 多模态桥） |
+| Embedding 角色 | Query-time 核心路径 | **Index-time only**（生成相似边） |
 | 聚类 | 可选 / 不做 | Leiden 社区发现（拓扑驱动） |
 | 可解释性 | 向量距离数字 | EXTRACTED / INFERRED / AMBIGUOUS 置信度标签 |
-| 查询开销 | O(vector search) | O(graph traversal) — 便宜 |
-| 增量 | 全量重建 embeddings | SHA256 文件 cache，只重算变化文件 |
+| 增量 | 全量重建 | SHA256 文件 cache，只重算变化文件 |
+
+---
+
+## 版本历程
+
+| 版本 | 状态 | 主要内容 |
+|------|------|---------|
+| v4.0 | ✅ | 图优先架构基础：NetworkX + Leiden + BFS/DFS + MCP Server |
+| v5.0 | ✅ | 多 namespace 支持、联合图、增量 ingest |
+| v5.1 | ✅ | BM25 混合检索、hybrid search |
+| v5.2 | ✅ | Edge classifier（EXTRACTED/INFERRED/AMBIGUOUS 置信度） |
+| v5.3 | ✅ | `atomize_document`：LLM 将长文档拆成原子知识片段 + inbox 审核流程 |
+| v5.4 | ✅ | KNOW-ID 路由 + label resolver（稳定节点 ID） |
+| v5.5 | ✅ | Atomize 语义去重（复用已有节点，减少冗余）|
+| v5.6 | ✅ | 图可视化升级：Obsidian URI 深链、portal 跨 namespace 节点 |
+| **v5.7** | ✅ | **force-graph WebGL 渲染器**（替换 pyvis）、统一 code+docs 图、ego-graph 焦点、多选 legend、聚类语义命名 |
+| v6.0 | 🔜 | 联邦元图（多 namespace 全局视图）|
+
+---
+
+## v5.7 可视化功能
+
+graph.html 基于 [force-graph](https://github.com/vasturiano/force-graph)（WebGL Canvas），支持：
+
+- **节点焦点**：单击节点 → 只显示该节点 + 直接邻居，其他节点变暗
+- **Legend 多选**：点击左侧色块 → 显示对应聚类所有节点；可叠加多个
+- **3-click 循环**：×1 焦点节点 → ×2 选中该节点所属聚类 → ×3 取消
+- **语义聚类命名**：legend 显示聚类中心节点的标签（如 `#LangGraph (36)`），而非 `doc group`
+- **LOD 标签**：缩放到一定级别才显示节点名称，避免拥挤
+- **键盘控制**：WASD 平移，`+`/`-` 缩放，`Escape` 重置
+- **on-demand 边**：`mentions_symbol`（doc→code 引用）默认隐藏，点击节点时按需显示
+- **右键打开 Obsidian**：doc 节点右键 → `obsidian://` 直接跳转原始笔记（需 `--vault` 参数）
+
+---
 
 ## 管线概览
 
 ```
-NimbusVault (.md + 附件)
+Vault (.md) + Repo (.py)
        │
-       ├─ Pass 1: AST 抽取（确定性，零 LLM）
-       │    └─ 解析 wikilinks [[...]] / tags #... / frontmatter / callouts
-       │       → EXTRACTED 边（confidence_score = 1.0）
+       ├─ Pass 1a: Markdown AST 抽取
+       │    └─ wikilinks / tags / frontmatter → EXTRACTED 边 (confidence=1.0)
        │
-       ├─ Pass 2: 媒体抽取
-       │    ├─ 图片 → Gemini Vision 描述 → 文本节点
-       │    ├─ PDF  → pypdf 抽文本 → 文本节点
-       │    └─ 音频 → faster-whisper 本地转录 → 文本节点
+       ├─ Pass 1b: Python 代码 AST (Tree-sitter)
+       │    └─ module / class / function / import → code:: 节点 + 调用边
        │
-       ├─ Pass 3: Embedding + 相似边生成（index-time only）
-       │    ├─ Gemini Embedding 2 算每个节点的向量
-       │    ├─ 全局 top-K 近邻检索
-       │    └─ 生成 semantically_similar_to 边（INFERRED, score = 余弦相似度）
+       ├─ Pass 2: Leiden 社区发现
+       │    └─ 纯拓扑聚类，识别社区 + 中心节点
        │
-       ├─ Pass 4: Leiden 社区发现
-       │    └─ 纯拓扑聚类，识别社区 + god nodes（最高度数概念）
+       ├─ Pass 3a: Embedding (Ollama bge-m3 / Gemini)
+       │    └─ 向量化每个节点，写入 Lance 索引
        │
-       └─ Pass 5: 报告生成
-            ├─ graph.json          # 持久化知识图
-            ├─ GRAPH_REPORT.md     # 社区概览 + god nodes + 惊奇连接
-            └─ graph.html          # 可选，pyvis 交互式可视化
+       ├─ Pass 3b: 相似边生成
+       │    └─ doc↔doc / code↔code / doc↔code 语义相似度边
+       │
+       ├─ Pass 3c: Symbol links
+       │    └─ doc 文本中提到的代码符号 → mentions_symbol 边
+       │
+       └─ Pass 4: 持久化
+            ├─ graph.json          # 知识图谱
+            ├─ GRAPH_REPORT.md     # 社区概览
+            └─ graph.html          # force-graph 交互式可视化
                                    │
                                    ▼
-                    ┌──────────────────────────┐
-                    │  MCP Server (query-time) │
-                    │                          │
-                    │  search_knowledge(query) │
-                    │  explain_node(name)      │
-                    │  trace_path(from, to)    │
-                    │  list_communities()      │
-                    │  explore_community(name) │
-                    └──────────────────────────┘
+                    ┌──────────────────────────────┐
+                    │  MCP Server (prism-rag serve) │
+                    │                              │
+                    │  search_knowledge  (hybrid)  │
+                    │  explain_node                │
+                    │  trace_path                  │
+                    │  list_communities            │
+                    │  explore_community           │
+                    │  atomize_document            │
+                    │  inbox_review / inbox_promote│
+                    │  + 11 Vault CRUD tools       │
+                    └──────────────────────────────┘
                                    │
                                    ▼
-              ZenithLoom agents (Hani / Asa / apex_coder / ...)
+              ZenithLoom agents (Hani / Asa / Jei / ...)
 ```
 
-## 关键技术栈
-
-| 层 | 选型 | 理由 |
-|---|---|---|
-| **图存储** | NetworkX + JSON | 零部署、可序列化、工具生态成熟 |
-| **社区发现** | `leidenalg` + `python-igraph` | Leiden 算法的规范实现（比 Louvain 更稳定） |
-| **Markdown AST** | `markdown-it-py` + `python-frontmatter` | 支持 wikilinks / callouts / frontmatter |
-| **Embedding** | Gemini Embedding 2 | 原生多模态，统一向量空间，index-time 一次性调用 |
-| **Embedding 缓存** | LanceDB（降级用途） | 只做 embedding cache，不做 query-time 检索 |
-| **MCP Server** | `mcp` 官方 SDK | 标准化工具协议，Zengyn42 其他 agent 可调用 |
-| **本地音频** | `faster-whisper` (optional) | 隐私：音频不出本地 |
-| **PDF / 图片** | `pypdf` / `pillow` + Gemini Vision | 按需启用 |
-
-## 设计原则
-
-1. **图优先** — Query-time 绝不做向量搜索，只走图遍历
-2. **Embedding 降级** — 只在 index-time 用一次，生成相似边 + 多模态桥
-3. **透明置信度** — 每条边标 EXTRACTED / INFERRED / AMBIGUOUS
-4. **Token 预算** — 所有查询接 `--budget N` 硬上限
-5. **增量友好** — SHA256 文件 cache，只重算变化的文件
-6. **隐私优先** — 本地优先（md AST / pdf / whisper）；只有 embedding 和图片描述走 Gemini API
-7. **零运维** — `pip install -e .` 即可启动，没有 Neo4j / Qdrant / Docker
-
-## Graph Schema
-
-**Node:**
-```python
-{
-    "id": "filestem_entityname",          # 稳定 ID
-    "label": "Human Readable Name",
-    "kind": "note|concept|tag|image|pdf|audio",
-    "source_file": "relative/path.md",
-    "content_hash": "sha256:...",         # 增量检测
-    "frontmatter": {...},
-    "tokens": 1234,                       # 节点内容 token 数（budget 管理用）
-}
-```
-
-**Edge:**
-```python
-{
-    "source": "node_id_a",
-    "target": "node_id_b",
-    "relation": "links_to|tagged_as|embeds|semantically_similar_to|mentions|illustrates",
-    "confidence": "EXTRACTED|INFERRED|AMBIGUOUS",
-    "confidence_score": 1.0,              # EXTRACTED=1.0, INFERRED=0.4-0.9, AMBIGUOUS=0.1-0.3
-    "weight": 1.0,                        # 用于 Leiden 聚类
-    "source_pass": "ast|media|embedding|llm",
-}
-```
-
-## 目录结构
-
-```
-PrismRag/
-├── prism_rag/
-│   ├── __init__.py
-│   ├── config.py               # Settings (paths, API keys, privacy tier)
-│   ├── cli.py                  # Typer CLI entrypoint
-│   │
-│   ├── ingest/                 # 5-pass pipeline
-│   │   ├── vault_loader.py     # Pass 1: md + frontmatter parsing
-│   │   ├── ast_extractor.py    # Pass 1: wikilinks / tags / callouts → EXTRACTED edges
-│   │   ├── media_extractor.py  # Pass 2: image / pdf / audio → text nodes
-│   │   ├── embedder.py         # Pass 3: Gemini Embedding 2 client
-│   │   └── similarity_linker.py # Pass 3: global top-K → semantically_similar_to edges
-│   │
-│   ├── store/
-│   │   ├── graph.py            # NetworkX graph + JSON (de)serialization
-│   │   └── embedding_cache.py  # LanceDB cache (index-time only)
-│   │
-│   ├── cluster/
-│   │   └── leiden.py           # Pass 4: Leiden community detection + god node detection
-│   │
-│   ├── report/
-│   │   └── graph_report.py     # Pass 5: GRAPH_REPORT.md generation
-│   │
-│   ├── retrieve/               # Query-time (no vector search)
-│   │   ├── bfs.py              # BFS traversal
-│   │   ├── dfs.py              # DFS traversal
-│   │   ├── budget.py           # Token-budget-aware pruning
-│   │   └── entry.py            # Entry point resolution (node match)
-│   │
-│   └── mcp_server/
-│       └── server.py           # MCP tools: search/explain/trace/communities
-│
-├── tests/
-├── docs/
-│   └── ARCHITECTURE.md         # 架构详解（本 repo 内）
-├── data/                       # Runtime: graph.json + embedding cache (gitignored)
-├── pyproject.toml
-├── .gitignore
-└── README.md
-```
+---
 
 ## Quick Start
 
@@ -168,42 +110,123 @@ PrismRag/
 # 安装（开发模式）
 git clone git@github.com:Zengyn42/PrismRag.git
 cd PrismRag
-pip install -e ".[dev,media,viz]"
+pip install -e ".[dev]"
 
-# 配置（settings via env vars or .env）
-export GEMINI_API_KEY="..."
-export PRISM_VAULT_PATH="$HOME/Foundation/Vault"
-
-# 初次索引 NimbusVault（未实现）
-# prism-rag ingest
-
-# 启动 MCP Server（未实现）
-# prism-rag serve
-
-# 查询（未实现）
-# prism-rag query "辩论子图的 session 机制"
-# prism-rag path "subgraph_topic" "fresh_per_call"
-# prism-rag explain "SubgraphMapperNode"
+# 配置（.env 或环境变量）
+cp .prism_env .env
+# 编辑 .env: PRISM_VAULT_PATH, GEMINI_API_KEY（可选）
 ```
+
+### ingest 文档 vault
+
+```bash
+prism-rag ingest --vault ~/Projects/MyVault --namespace my_project
+# → 输出到 ~/Projects/MyVault/.prismrag/my_project/
+```
+
+### ingest 代码 + 文档统一图
+
+```bash
+prism-rag ingest-project --repo ~/Projects/Pulsify
+# → 输出到 ~/Projects/Pulsify/.prismrag/pulsify/
+```
+
+### 查看可视化
+
+```bash
+prism-rag visualize
+# → 打开 .prismrag/<ns>/graph.html
+```
+
+### 启动 MCP Server
+
+```bash
+prism-rag serve          # stdio 模式（Claude Code / Cursor）
+prism-rag serve --transport sse  # SSE 模式（网络访问）
+```
+
+### atomize（原子化拆分长文档）
+
+```bash
+prism-rag atomize propose --node "my-note-id"
+prism-rag atomize inbox             # 审核提案
+prism-rag atomize promote <id>      # 批准写入图
+```
+
+---
+
+## 目录结构
+
+```
+PrismRag/
+├── prism_rag/
+│   ├── cli.py                  # CLI 入口 (prism-rag 命令集)
+│   ├── cli_atomize.py          # atomize 子命令
+│   ├── config.py               # PrismRagSettings
+│   ├── ingest/                 # 摄入管线
+│   │   ├── vault_loader.py     # Markdown 文件扫描
+│   │   ├── obsidian_parser.py  # Obsidian wikilinks/frontmatter
+│   │   ├── ast_extractor.py    # 图节点/边提取
+│   │   ├── code_parser.py      # Tree-sitter Python 解析
+│   │   ├── atomize.py          # LLM 原子化拆分
+│   │   ├── embedder.py         # Ollama / Gemini 向量化
+│   │   ├── similarity_linker.py# 语义相似度建边
+│   │   ├── symbol_linker.py    # doc→code 符号引用边
+│   │   ├── edge_classifier.py  # 边置信度分类
+│   │   ├── label_resolver.py   # KNOW-ID 标签解析
+│   │   ├── dedup_log.py        # 去重日志
+│   │   └── incremental.py      # 增量更新
+│   ├── store/                  # 图数据库层
+│   │   ├── graph.py            # KnowledgeGraph 核心
+│   │   ├── networkx_backend.py # NetworkX 实现
+│   │   ├── embedding_store.py  # Lance 向量索引
+│   │   ├── bm25_index.py       # BM25 关键词索引
+│   │   ├── federated.py        # 多 namespace 联合图
+│   │   └── registry.py         # Namespace 注册表
+│   ├── cluster/
+│   │   └── leiden.py           # Leiden 社区检测
+│   ├── retrieve/               # 检索引擎
+│   │   ├── entry.py            # 检索入口
+│   │   ├── hybrid.py           # 混合检索
+│   │   ├── bfs.py / dfs.py     # 图遍历
+│   │   └── impact.py           # 影响分析
+│   ├── inbox/                  # Atomize 审核收件箱
+│   ├── report/
+│   │   ├── visualize.py        # force-graph WebGL HTML
+│   │   └── graph_report.py     # 文字统计报告
+│   ├── vault_ops/              # Vault 文件读写操作
+│   └── mcp_server/             # MCP Server (18 tools)
+├── docs/                       # 架构文档 + 设计方案
+├── pyproject.toml
+└── README.md
+```
+
+---
+
+## 技术栈
+
+| 层 | 选型 |
+|---|---|
+| 图存储 | NetworkX + JSON |
+| 社区发现 | `leidenalg` + `python-igraph` |
+| 代码解析 | `tree-sitter` |
+| Markdown AST | `markdown-it-py` + `python-frontmatter` |
+| Embedding | Ollama `bge-m3`（默认）/ Gemini Embedding |
+| 向量索引 | LanceDB（index-time only）|
+| 可视化 | [force-graph](https://github.com/vasturiano/force-graph)（WebGL Canvas） |
+| MCP Server | `mcp` 官方 SDK (FastMCP) |
+
+---
 
 ## 相关仓库
 
 | Repo | 定位 |
 |---|---|
-| [Zengyn42/ZenithLoom](https://github.com/Zengyn42/ZenithLoom) | Agent 编排引擎（LangGraph 核心） |
-| [Zengyn42/NimbusVault](https://github.com/Zengyn42/NimbusVault) | Obsidian 知识库（PrismRag 的数据源） |
+| [Zengyn42/ZenithLoom](https://github.com/Zengyn42/ZenithLoom) | Agent 编排引擎（LangGraph） |
+| [Zengyn42/NimbusVault](https://github.com/Zengyn42/NimbusVault) | Obsidian 知识库（PrismRag 数据源之一） |
 | **Zengyn42/PrismRag** | **本仓库** |
 
-## 设计文档
-
-- 完整架构设计（含 ADR、表结构、Phase 路线）：[NimbusVault/knowledge/PrismRag-v4.0-设计文档.md](https://github.com/Zengyn42/NimbusVault/blob/master/knowledge/PrismRag-v4.0-设计文档.md)（待写）
-- 历史 v3.2 设计（向量检索流派）：[NimbusVault/knowledge/Obsidian 多模态 RAG 系统架构设计.md](https://github.com/Zengyn42/NimbusVault/blob/master/knowledge/Obsidian多模态RAG系统架构设计.md) — 作为历史记录保留
-
-## 灵感来源
-
-- [safishamsi/graphify](https://github.com/safishamsi/graphify) — 图优先 RAG、Leiden 拓扑聚类、EXTRACTED/INFERRED/AMBIGUOUS 置信度标签
-- Gemini Embedding 2（多模态向量空间）
-- Obsidian wikilink graph（天然的 EXTRACTED 边源）
+---
 
 ## License
 
