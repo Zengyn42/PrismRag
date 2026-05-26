@@ -1,185 +1,338 @@
-# PrismRag v4.0 Architecture
+# PrismRag v5.7 Architecture
 
-> This document is a concise in-repo architecture summary. The complete design (including ADRs, table schemas, and roadmap) is available at:
->
-> 👉 [NimbusVault/knowledge/PrismRag-v4.0-设计文档.md](https://github.com/Zengyn42/NimbusVault/blob/master/knowledge/PrismRag-v4.0-设计文档.md)
+> Historical version: [v4.0 Architecture](archive/ARCHITECTURE-v4.0.en.md)
 
 ---
 
-## Paradigm: Graph-First RAG
+## Core Proposition
 
-The core proposition of PrismRag v4.0 is captured in one sentence from the graphify school of thought:
-
-> **Storage is a graph, clustering is topology, retrieval is traversal; Embeddings are only used at index-time to build similarity edges and multimodal bridges.**
+> **Clustering is graph-topology-based. Retrieval is graph traversal. Embedding only builds edges.**
 
 Key differences from traditional RAG:
 
-| Phase | Traditional RAG | PrismRag v4.0 |
+| Dimension | Traditional RAG | PrismRag v5.7 |
 |---|---|---|
-| **Index time** | Split chunks → embed → write to vector store | Parse AST → extract edges → embed (similarity edges only) → Leiden clustering → generate graph and report |
-| **Query time** | Vector search top-K → re-rank → return chunks | Match entry node → graph traversal (BFS/DFS) → token budget pruning → return nodes |
+| Primary storage | Vector database | NetworkX graph + JSON |
+| Primary retrieval | Vector similarity search (query-time) | Graph traversal BFS / DFS (query-time) |
+| Embedding role | Core query-time path | **Index-time only** (builds similarity edges) |
+| Clustering | Optional / skipped | Leiden community detection (topology-only, no LLM) |
+| Explainability | Vector distance numbers | EXTRACTED / INFERRED / AMBIGUOUS confidence labels |
+| Incremental updates | Full rebuild | SHA256 file cache, only re-processes changed files |
+| Data sources | Single document set | Markdown vault + Python codebase (unified graph) |
 
-## Five-Layer Pipeline
+---
 
-### Pass 1: AST Extraction (Deterministic, Zero LLM)
+## Input Types
 
-**Input**: `.md` files in NimbusVault
+| Type | Command | Description |
+|---|---|---|
+| Markdown vault (Obsidian) | `prism-rag ingest` | Document-only graph |
+| Python codebase | `prism-rag ingest-code` | Code-only graph |
+| Code + docs unified graph | `prism-rag ingest-project` | code + docs, bridged via symbol links |
+
+Output convention: `<target>/.prismrag/<namespace>/`
+
+---
+
+## Pipeline Overview (7 Passes)
+
+```
+Vault (.md) + Repo (.py)
+       │
+       ├─ Pass 1a: Markdown AST extraction
+       │
+       ├─ Pass 1b: Python code AST (Tree-sitter)
+       │
+       ├─ Pass 2: Leiden community detection
+       │
+       ├─ Pass 3a: Embedding (Ollama / Gemini)
+       │
+       ├─ Pass 3b: Similarity edge generation
+       │
+       ├─ Pass 3c: Symbol links (doc→code)
+       │
+       └─ Pass 4: Persist + visualize
+```
+
+---
+
+## Pass 1a: Markdown AST Extraction (Deterministic, Zero LLM)
+
+**Input**: `.md` files under the vault
 
 **Processing**:
 - `python-frontmatter` parses YAML frontmatter → metadata
 - `markdown-it-py` parses markdown into AST
-- Extract structured signals:
-  - `[[wikilink]]` → `links_to` edge
-  - `[[note#heading]]` → `links_to_section` edge
-  - `[[note^block-id]]` → `links_to_block` edge
-  - `#tag` → `tagged_as` edge (tags as independent nodes)
-  - `![[embedded.png]]` → `embeds` edge (media nodes)
-  - frontmatter `aliases:` → `aliased_as` edge
-  - frontmatter `category:` → `categorized_as` edge
-  - Callout `> [!NOTE]` → intra-node structure markers
+- Extracts structured signals:
 
-**Output**: All **EXTRACTED** edges (`confidence_score = 1.0`), zero cost.
+| Signal | Edge type | Confidence |
+|---|---|---|
+| `[[wikilink]]` | `links_to` | EXTRACTED (1.0) |
+| `[[note#heading]]` | `links_to_section` | EXTRACTED (1.0) |
+| `#tag` | `tagged_as` | EXTRACTED (1.0) |
+| frontmatter `aliases:` | `aliased_as` | EXTRACTED (1.0) |
+| frontmatter `category:` | `categorized_as` | EXTRACTED (1.0) |
 
-**Why this pass matters most**: Obsidian wikilinks are **explicitly** declared semantic connections by the user — more precise than code imports. graphify uses tree-sitter for AST extraction on codebases; here we use markdown-it on Obsidian, but the signal quality is even higher.
+**Output**: All **EXTRACTED** edges (`confidence_score = 1.0`), zero LLM cost.
 
-### Pass 2: Media Extraction (Optional, Enable on Demand)
+**KNOW-ID routing (v5.4+)**: Nodes with `knowledge_id` in frontmatter use stable IDs. Label resolved via three-layer fallback: `title` → `clean_slug` → stem.
 
-**Input**: Attachment files (images, PDFs, audio)
+---
 
-**Processing**:
-- **Images** → Gemini Vision description → generates `image:filename` text node with Vision description as content
-- **PDF** → `pypdf` text extraction → split into markdown-style nodes (or a single large node)
-- **Audio** → `faster-whisper` local transcription → text node
-  - Advanced: use god nodes from Pass 4 clustering as Whisper domain prompts, improving technical term accuracy (reference: graphify)
+## Pass 1b: Python Code AST (Tree-sitter)
 
-**Output**: All media converted to text nodes, attached as targets of the source document's `embeds` edge.
-
-### Pass 3: Embedding + Similarity Edge Generation (THE ONLY PLACE embeddings are used at index-time)
-
-**Input**: All text nodes (Pass 1 markdown + Pass 2 media-to-text)
+**Input**: `.py` files under the repo
 
 **Processing**:
-1. Compute Gemini Embedding 2 vectors for each node
-2. Store in LanceDB (pure cache, not used at query-time)
-3. Global top-K nearest neighbor search
-4. For each node's top-K neighbors, generate `semantically_similar_to` edges
-   - `confidence = INFERRED`
-   - `confidence_score = cosine similarity (0.4–0.95)`
-   - Below threshold (e.g. 0.6) edges are not generated, to avoid noise
-5. Deduplication: if a `semantically_similar_to` edge is dominated by a stronger EXTRACTED edge (e.g. `links_to`), optionally merge / upgrade weight
+- `tree-sitter` parses Python AST
+- Extracts code structures:
 
-**Why not use embeddings at query-time**: Graph traversal already reaches "semantically related but not wikilinked" nodes via `semantically_similar_to` edges. The value of embeddings is already "baked into" the graph.
+| Structure | Node prefix | Example |
+|---|---|---|
+| Module | `code::module::` | `code::module::prism_rag.cli` |
+| Class | `code::class::` | `code::class::KnowledgeGraph` |
+| Function | `code::func::` | `code::func::search_knowledge` |
+| Import | — | generates `imports` edge |
 
-**Multimodal bridge**: Gemini Embedding 2 natively supports text + image + audio + PDF in the same vector space. A text query for "cat" can hit an image node's vector even if the Vision description never used the word "cat".
+- `defines` edges: module → class/function
+- `calls` edges: caller → callee (static call graph)
+- `imports` edges: module → imported symbol
 
-### Pass 4: Leiden Community Detection
+**Output**: `code::` nodes + call graph edges, all EXTRACTED.
 
-**Input**: The merged complete graph
+---
+
+## Pass 2: Leiden Community Detection
+
+**Input**: Complete graph from Pass 1 (doc nodes + code nodes)
 
 **Processing**:
 - `python-igraph` converts NetworkX to igraph representation
-- `leidenalg.find_partition(..., leidenalg.ModularityVertexPartition)` runs community detection
-- Edge weight = `confidence_score × weight` (EXTRACTED edges highest, INFERRED next)
-- Identify god nodes per community: top-N nodes by degree within the community
-- Name communities: using LLM (or simple heuristics) summarizing from god node labels
+- `leidenalg.find_partition(ModularityVertexPartition)` runs community detection
+- Edge weight = `confidence_score × weight` (EXTRACTED edges have highest weight)
+- Each community identifies a **hub node** (highest-degree node in the community)
+- Hub node label becomes the community name (used in visualization legend, e.g. `#LangGraph (36)`)
 
-**Output**:
-- `community_id` attribute on each node
-- Per-community `{id, label, god_nodes, member_count}`
+**Output**: Each node tagged with `community_id`; community metadata (hub node, member count)
 
-**Tag priority**: Obsidian `#tag` values can serve as initial partitions for Leiden, allowing community detection to converge faster toward structures that match user mental models.
+---
 
-### Pass 5: Report and Persistence
+## Pass 3a: Embedding (INDEX-TIME ONLY)
 
-**Output**:
-- `graph.json` — full graph serialization (nodes + edges + communities + metadata)
-- `GRAPH_REPORT.md` — human-readable report including:
-  - Name, god nodes, and member count per community
-  - Top 10 god nodes (the most central nodes of the entire graph)
-  - Surprising connections (high-confidence cross-community edges)
-  - Open questions (optionally LLM-generated, inferred from "INFERRED edges without EXTRACTED counterparts")
-- `graph.html` — optional, interactive visualization generated by `pyvis`
+**Input**: All text nodes
+
+**Model options**:
+
+| Model | Backend | Dimensions | Use case |
+|---|---|---|---|
+| `bge-m3` | Ollama (local) | 1024 | Default, bilingual |
+| `qwen3-embedding:8b` | Ollama (local) | 1024 | Chinese-heavy content |
+| `text-embedding-004` | Gemini API | 768 | Cloud fallback |
+
+**Processing**:
+1. Compute vector for each node
+2. Write to LanceDB (`embed_cache.lance`) as cache only
+3. SHA256 content hash prevents redundant recomputation
+
+**Key constraint**: Vectors are **NOT used at query time** (only used in Pass 3b to build edges).
+
+---
+
+## Pass 3b: Similarity Edge Generation
+
+**Input**: LanceDB vector cache
+
+**Processing**:
+- Global top-K ANN search (default K=10)
+- Generate `semantically_similar_to` edges for each pair
+- Confidence rules:
+  - `confidence = INFERRED`
+  - `confidence_score = cosine similarity`
+  - Pairs below threshold (default 0.5) are skipped
+
+**Cross-type edges**:
+- doc ↔ doc
+- code ↔ code
+- doc ↔ code (requires `--cross-modal`)
+
+---
+
+## Pass 3c: Symbol Links (doc → code)
+
+**Input**: Doc node text + code symbol set
+
+**Processing**:
+- Scans doc node content for code symbol names (exact string match)
+- Generates `mentions_symbol` edges (doc → code)
+- Confidence = EXTRACTED
+
+**Visualization behavior**: `mentions_symbol` edges are hidden by default; shown on node click (avoids cluttering the graph).
+
+---
+
+## Pass 4: Persist + Visualize
+
+**Output files** (stored in `.prismrag/<namespace>/`):
+
+| File | Description |
+|---|---|
+| `graph.json` | Complete knowledge graph (nodes + edges + communities + metadata) |
+| `GRAPH_REPORT.md` | Text statistics report (community overview, hub nodes, edge stats) |
+| `graph.html` | force-graph WebGL interactive visualization |
+| `embed_cache.lance/` | LanceDB vector cache |
+| `bm25_index/` | BM25 keyword index |
+
+### graph.html Visualization Features (v5.7)
+
+Powered by [force-graph](https://github.com/vasturiano/force-graph) (WebGL Canvas):
+
+| Feature | Description |
+|---|---|
+| Node focus | Click node → show only that node + direct neighbors |
+| Multi-select legend | Click color swatch → show all nodes in cluster; stackable |
+| 3-click cycle | ×1 focus node → ×2 select node's cluster → ×3 clear |
+| Semantic cluster names | Legend shows hub node label (e.g. `#LangGraph (36)`) |
+| LOD labels | Labels fade in as you zoom in — no clutter at low zoom |
+| Keyboard controls | WASD to pan, `+`/`-` to zoom, Escape to reset |
+| On-demand edges | `mentions_symbol` hidden by default, shown on node click |
+| Right-click Obsidian | Right-click doc node → `obsidian://` opens original note |
+
+---
+
+## Incremental Updates
+
+- Each file gets a SHA256 hash stored in `file_hashes.json`
+- Subsequent ingest runs only reprocess files whose hash changed
+- Embedding cache is keyed by `(node_id, content_hash)` — unchanged nodes reuse existing vectors
+- Leiden reruns fully after graph changes (incremental Leiden is future work)
 
 ---
 
 ## Query Time (Zero Embedding)
 
-The query flow is **pure graph traversal**:
-
 ```
-User query ──► entry point resolution
-                     │
-                     ├─ exact match by label
-                     ├─ match by alias
-                     └─ find nearest node by embedding (fallback)
-                     │
-                     ▼
-              entry_node
-                     │
-                     ▼
-           ┌─────────────────┐
-           │ traversal       │
-           │  BFS (default)  │──► broad context
-           │  DFS (--dfs)    │──► single chain
-           │  path (a → b)   │──► shortest path
-           └─────────────────┘
-                     │
-                     ▼
-           token budget pruning
-           (each node carries a token count, accumulated up to the budget limit)
-                     │
-                     ▼
-           return: [nodes], [edges], community_info
+User query
+    │
+    ▼
+Entry node resolution
+    ├─ label / alias exact match
+    ├─ BM25 keyword search
+    └─ ANN vector search (fallback, top-1 only)
+    │
+    ▼
+Graph traversal
+    ├─ BFS (default — broad context)
+    ├─ DFS (single-chain depth)
+    └─ path(a→b) (shortest path)
+    │
+    ▼
+Token budget pruning (--budget N)
+    │
+    ▼
+Return: [nodes], [edges], community_info
 ```
 
 **Key properties**:
-- **No vector search** (except entry point fallback, which is a single top-1 lookup)
+- **No vector search** at query time (except entry point fallback, top-1 only)
 - **No re-ranking**
-- **Hard budget cap**: `--budget 4000` means at most 4000 tokens of node content are returned
-- **Deterministic**: same query yields same results
+- **Deterministic output**: same query always returns same result
+- **Hard budget cap**: `--budget 4000` returns at most 4000 tokens of node content
 
-## MCP Tools
+---
 
-Exposed MCP tools (see `prism_rag.mcp_server.server`):
+## Atomize Pipeline (v5.3+)
 
-| Tool | Purpose | Parameters |
-|---|---|---|
-| `search_knowledge` | Primary query entry point: query → entry → BFS → return relevant nodes | `query`, `budget`, `mode=bfs\|dfs` |
-| `explain_node` | Return all info + neighbor summary for a specific node | `node_id_or_label` |
-| `trace_path` | Return the shortest path between two nodes | `from`, `to` |
-| `list_communities` | List all communities + god nodes | — |
-| `explore_community` | Drill into a community to examine internal structure | `community_id_or_label` |
+For notes that contain multiple independent knowledge points:
 
-## Incremental Updates
+```
+prism-rag atomize propose --node <id>
+    │
+    ▼ LLM (Gemini / Claude) splits into atomic proposals
+    │
+    ▼ Proposals written to inbox for review
+    │
+prism-rag atomize inbox          # human review
+    │
+prism-rag atomize promote <id>   # approve → write to graph
+```
 
-- Each file's SHA256 is computed and stored in `data/cache/file_hashes.json`
-- On the next `ingest`, only files with changed hashes are reprocessed
-- Impact of a single file change:
-  - Passes 1–3 re-run for that file
-  - Pass 4 Leiden incremental update (not a full recompute)
-  - Pass 5 report regenerated
+- Atomic nodes use `knowledge_id` frontmatter as stable ID
+- Semantic deduplication (v5.5): checks for equivalent existing nodes before generating, avoids redundancy
 
-## Privacy Tiers
+---
 
-| Data | Local Processing | Sent to Gemini API |
-|---|---|---|
-| Markdown content, wikilinks, frontmatter | ✅ Pass 1 | ❌ never leaves local |
-| PDF text | ✅ pypdf locally | ❌ |
-| Audio | ✅ faster-whisper locally | ❌ |
-| Image pixels | ❌ | ✅ Gemini Vision |
-| Text embeddings | ❌ | ✅ Gemini Embedding 2 |
+## MCP Server (18 tools)
 
-**Default paid tier**: Gemini free-tier data is used for training. PrismRag requires a paid-tier API key by default; users must explicitly set `PRIVACY_TIER=free` to use the free tier, and a warning is shown at startup.
+Started with `prism-rag serve`. Supports both stdio and SSE transports.
 
-## Differences from v3.2 Design (Summary)
+### Retrieval Tools
 
-| Dimension | v3.2 (Traditional RAG) | v4.0 (Graph-First) |
-|---|---|---|
-| Primary storage | LanceDB vector store | NetworkX + JSON |
-| Primary retrieval path | Hybrid Search + RRF + cross-encoder | Graph traversal BFS/DFS |
-| Embedding role | Core at query time | Index-time only (similarity edges + multimodal bridge) |
-| Phase 1/2 division | Phase 1: basic RAG; Phase 2: GraphRAG | Phase 1 is already the complete graph |
-| Code complexity | High (multi-pipeline) | Low (single pipeline) |
-| LLM dependency | Query-time re-rank | Index-time only in Pass 2 image description |
+| Tool | Purpose |
+|---|---|
+| `search_knowledge` | Main retrieval (hybrid: BM25 + entry + BFS) |
+| `explain_node` | Node details + neighbor overview |
+| `trace_path` | Shortest path between two nodes |
+| `list_communities` | List all communities + hub nodes |
+| `explore_community` | Drill into a community |
 
-**Complete diff, ADRs, and migration notes** are in the v4.0 design document in NimbusVault.
+### Atomize Tools
+
+| Tool | Purpose |
+|---|---|
+| `atomize_document` | LLM splits node into atomic fragments |
+| `inbox_review` | List pending proposals |
+| `inbox_promote` | Approve proposal and write to graph |
+
+### Vault CRUD Tools (11 tools)
+
+Read, create, update, delete notes in an Obsidian vault; supports frontmatter operations, alias management, etc.
+
+---
+
+## Data Storage Layout
+
+```
+<target>/.prismrag/<namespace>/
+├── graph.json            # complete knowledge graph
+├── GRAPH_REPORT.md       # statistics report
+├── graph.html            # interactive visualization
+├── file_hashes.json      # SHA256 incremental cache
+├── embed_cache.lance/    # LanceDB vector cache
+└── bm25_index/           # BM25 index
+```
+
+Each target (vault or repo) has its own isolated `.prismrag/` directory.
+
+---
+
+## Tech Stack
+
+| Layer | Choice |
+|---|---|
+| Graph storage | NetworkX + JSON |
+| Community detection | `leidenalg` + `python-igraph` |
+| Code parsing | `tree-sitter` |
+| Markdown AST | `markdown-it-py` + `python-frontmatter` |
+| Embedding | Ollama `bge-m3` / `qwen3-embedding:8b` (default); Gemini API (fallback) |
+| Vector cache | LanceDB |
+| Keyword index | BM25 (`rank_bm25`) |
+| Visualization | [force-graph](https://github.com/vasturiano/force-graph) (WebGL Canvas) |
+| MCP Server | `mcp` official SDK (FastMCP) |
+| Configuration | `pydantic-settings` (.env / environment variables) |
+
+---
+
+## v6.0 Outlook: Federated Meta-Graph
+
+> See [v6.0-design.en.md](v6.0-design.en.md) and [v6.0-implementation-plan.en.md](v6.0-implementation-plan.en.md)
+
+Core goal: unified global view across multiple namespaces (different vaults / repos).
+
+- **manifest.json**: metadata registry per namespace
+- **FederatedGraph**: runtime federation over multiple KnowledgeGraph instances
+- **Cross-namespace bridge edges**: shared tag + import (deterministic) → hub node ANN (semantic)
+- **Federated visualization**: namespace super-node meta-graph + drill-down to single namespace
+
+---
+
+*— Zengyn42 · Zenith Horizon*

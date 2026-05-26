@@ -1,185 +1,338 @@
-# PrismRag v4.0 架构
+# PrismRag v5.7 架构
 
-> 本文档是本 repo 内的架构简要版。完整设计（含 ADR、表结构、路线图）见：
->
-> 👉 [NimbusVault/knowledge/PrismRag-v4.0-设计文档.md](https://github.com/Zengyn42/NimbusVault/blob/master/knowledge/PrismRag-v4.0-设计文档.md)
+> 历史版本：[v4.0 架构说明](archive/ARCHITECTURE-v4.0.md)
 
 ---
 
-## 范式：图优先 RAG
+## 核心命题
 
-PrismRag v4.0 的核心命题是 graphify 流派的一句话：
+> **Clustering is graph-topology-based. Retrieval is graph traversal. Embedding only builds edges.**
 
-> **存储是图，聚类是拓扑，检索是遍历；Embedding 只在 index-time 用于构建相似性边和多模态桥。**
+PrismRag 与传统 RAG 的本质区别：
 
-这和传统 RAG 的核心区别：
-
-| 时间 | 传统 RAG | PrismRag v4.0 |
+| 维度 | 传统 RAG | PrismRag v5.7 |
 |---|---|---|
-| **Index time** | 切 chunk → embed → 写向量库 | 解析 AST → 抽取边 → embed（只算相似边）→ Leiden 聚类 → 生成图和报告 |
-| **Query time** | 向量搜索 top-K → re-rank → 返回 chunks | 匹配入口节点 → 图遍历（BFS/DFS）→ token 预算裁剪 → 返回节点 |
+| 主存储 | 向量数据库 | NetworkX 图 + JSON |
+| 主检索 | 向量相似度搜索（query time） | 图遍历 BFS / DFS（query time） |
+| Embedding 角色 | Query-time 核心路径 | **Index-time only**（生成相似边） |
+| 聚类 | 可选 / 不做 | Leiden 社区发现（纯拓扑，无 LLM） |
+| 可解释性 | 向量距离数字 | EXTRACTED / INFERRED / AMBIGUOUS 置信度标签 |
+| 增量更新 | 全量重建 | SHA256 文件 cache，只重处理变化文件 |
+| 数据来源 | 单一文档集 | Markdown vault + Python 代码库（统一图） |
 
-## 五层 Pipeline
+---
 
-### Pass 1: AST 抽取（确定性，零 LLM）
+## 输入类型
 
-**输入**：NimbusVault 里的 `.md` 文件
+| 类型 | 命令 | 说明 |
+|---|---|---|
+| Markdown vault（Obsidian） | `prism-rag ingest` | 纯文档图 |
+| Python 代码库 | `prism-rag ingest-code` | 纯代码图 |
+| 代码 + 文档统一图 | `prism-rag ingest-project` | code + docs，symbol link 跨接 |
+
+输出目录约定：`<target>/.prismrag/<namespace>/`
+
+---
+
+## Pipeline 总览（七步）
+
+```
+Vault (.md) + Repo (.py)
+       │
+       ├─ Pass 1a: Markdown AST 抽取
+       │
+       ├─ Pass 1b: Python 代码 AST（Tree-sitter）
+       │
+       ├─ Pass 2: Leiden 社区发现
+       │
+       ├─ Pass 3a: Embedding（Ollama / Gemini）
+       │
+       ├─ Pass 3b: 相似边生成
+       │
+       ├─ Pass 3c: Symbol links（doc→code）
+       │
+       └─ Pass 4: 持久化 + 可视化
+```
+
+---
+
+## Pass 1a：Markdown AST 抽取（确定性，零 LLM）
+
+**输入**：vault 下的 `.md` 文件
 
 **处理**：
 - `python-frontmatter` 解析 YAML frontmatter → metadata
 - `markdown-it-py` 把 md 解析成 AST
 - 提取结构化信号：
-  - `[[wikilink]]` → `links_to` 边
-  - `[[note#heading]]` → `links_to_section` 边
-  - `[[note^block-id]]` → `links_to_block` 边
-  - `#tag` → `tagged_as` 边（tag 作为独立节点）
-  - `![[embedded.png]]` → `embeds` 边（媒体节点）
-  - frontmatter `aliases:` → `aliased_as` 边
-  - frontmatter `category:` → `categorized_as` 边
-  - Callout `> [!NOTE]` → intra-node 结构标记
 
-**输出**：全部是 **EXTRACTED** 边（`confidence_score = 1.0`），零成本。
+| 信号 | 生成边类型 | 置信度 |
+|---|---|---|
+| `[[wikilink]]` | `links_to` | EXTRACTED (1.0) |
+| `[[note#heading]]` | `links_to_section` | EXTRACTED (1.0) |
+| `#tag` | `tagged_as` | EXTRACTED (1.0) |
+| frontmatter `aliases:` | `aliased_as` | EXTRACTED (1.0) |
+| frontmatter `category:` | `categorized_as` | EXTRACTED (1.0) |
 
-**为什么这一步最重要**：Obsidian 的 wikilink 是用户**显式**声明的语义链接，比代码 import 还精准。graphify 在代码库上靠 tree-sitter 抽 AST；我们在 Obsidian 上靠 markdown-it，但信号质量更高。
+**输出**：全部 **EXTRACTED** 边（`confidence_score = 1.0`），零 LLM 成本。
 
-### Pass 2: 媒体抽取（可选，按需启用）
-
-**输入**：附件文件（图片、PDF、音频）
-
-**处理**：
-- **图片** → Gemini Vision 描述 → 生成 `image:filename` 文本节点，内容是 Vision 的描述
-- **PDF** → `pypdf` 提取文本 → 切成 md 风格的节点（或单个大节点）
-- **音频** → `faster-whisper` 本地转录 → 文本节点
-  - 高级：用 Pass 4 聚类之后的 god nodes 作为 Whisper 的 domain prompt，提升技术术语准确度（参考 graphify）
-
-**输出**：所有媒体都转成文本节点，挂到原文档的 `embeds` 边的目标上。
-
-### Pass 3: Embedding + 相似边生成（INDEX-TIME 唯一用到 embedding 的地方）
-
-**输入**：所有文本节点（Pass 1 的 md + Pass 2 的媒体转文本）
-
-**处理**：
-1. 给每个节点算 Gemini Embedding 2 向量
-2. 存到 LanceDB（纯 cache，不做 query-time 用）
-3. 全局 top-K 近邻搜索
-4. 对每个节点的 top-K 邻居，生成 `semantically_similar_to` 边
-   - `confidence = INFERRED`
-   - `confidence_score = 余弦相似度 (0.4-0.95)`
-   - 低于阈值（比如 0.6）的不生成，避免噪声
-5. 去重：如果 `semantically_similar_to` 边已经有更强的 EXTRACTED 边（比如 `links_to`），可选择合并 / 升级权重
-
-**为什么不在 query-time 用**：图遍历已经能通过 `semantically_similar_to` 边到达"语义相关但没 wikilink"的节点。Embedding 的价值已经"固化"到图里了。
-
-**多模态桥**：Gemini Embedding 2 原生支持 text + image + audio + PDF 在同一个向量空间。文字 query "猫" 能命中图片节点的向量，即使 Vision 没把"猫"这个词写进描述里。
-
-### Pass 4: Leiden 社区发现
-
-**输入**：合并后的完整图
-
-**处理**：
-- `python-igraph` 把 NetworkX 转成 igraph 表示
-- `leidenalg.find_partition(..., leidenalg.ModularityVertexPartition)` 跑社区发现
-- 边权重 = `confidence_score × weight`（EXTRACTED 边权重最高，INFERRED 次之）
-- 每个社区识别 god nodes：社区内 degree 最高的 N 个节点
-- 给社区起名：用 LLM（或简单启发式）从 god nodes 的 label 概括
-
-**输出**：
-- 每个节点的 `community_id` 属性
-- 每个社区的 `{id, label, god_nodes, member_count}`
-
-**Tag 优先级**：Obsidian 的 `#tag` 可以作为 Leiden 的 initial partition（初始标签），让社区发现更快收敛到"符合用户认知"的结构。
-
-### Pass 5: 报告与持久化
-
-**输出**：
-- `graph.json` — 图的完整序列化（nodes + edges + communities + metadata）
-- `GRAPH_REPORT.md` — 人类可读的报告，包含：
-  - 每个社区的名称、god nodes、成员数
-  - Top 10 god nodes（整个图的中心节点）
-  - Surprising connections（跨社区的高置信度边）
-  - Open questions（LLM 可选生成，从"有 INFERRED 边但没 EXTRACTED 边"推导）
-- `graph.html` — 可选，`pyvis` 生成的交互式可视化
+**KNOW-ID 路由（v5.4+）**：frontmatter 中声明 `knowledge_id` 的节点使用稳定 ID；label 按三层规则解析：`title` → `clean_slug` → stem。
 
 ---
 
-## Query Time（零 embedding）
+## Pass 1b：Python 代码 AST（Tree-sitter）
 
-查询流程是**纯图遍历**：
+**输入**：repo 下的 `.py` 文件
 
-```
-User query ──► entry point resolution
-                     │
-                     ├─ 按 label 精确匹配
-                     ├─ 按 alias 匹配
-                     └─ 用 embedding 找最近节点（fallback）
-                     │
-                     ▼
-              entry_node
-                     │
-                     ▼
-           ┌─────────────────┐
-           │ traversal       │
-           │  BFS (default)  │──► broad context
-           │  DFS (--dfs)    │──► single chain
-           │  path (a → b)   │──► shortest path
-           └─────────────────┘
-                     │
-                     ▼
-           token budget pruning
-           (每个节点带 tokens 计数，累加到 budget 上限)
-                     │
-                     ▼
-           return: [nodes], [edges], community_info
-```
+**处理**：
+- `tree-sitter` 解析 Python AST
+- 提取以下代码结构：
 
-**关键性质**：
-- **没有 vector search**（除了 entry point 的 fallback，且是 top-1 单次）
-- **没有 re-ranking**
-- **预算硬上限**：`--budget 4000` 意思是最多返回 4000 tokens 的节点内容
-- **确定性**：同样的 query 得到同样的结果
-
-## MCP Tools
-
-对外暴露的 MCP 工具（详见 `prism_rag.mcp_server.server`）：
-
-| 工具 | 用途 | 参数 |
+| 结构 | 节点前缀 | 示例 |
 |---|---|---|
-| `search_knowledge` | 主要查询入口，query → entry → BFS → 返回相关节点 | `query`, `budget`, `mode=bfs\|dfs` |
-| `explain_node` | 返回一个具体节点的所有信息 + 邻居概览 | `node_id_or_label` |
-| `trace_path` | 返回两个节点间的最短路径 | `from`, `to` |
-| `list_communities` | 列出所有社区 + god nodes | — |
-| `explore_community` | 钻进某个社区看内部结构 | `community_id_or_label` |
+| 模块 | `code::module::` | `code::module::prism_rag.cli` |
+| 类 | `code::class::` | `code::class::KnowledgeGraph` |
+| 函数 | `code::func::` | `code::func::search_knowledge` |
+| import | — | 生成 `imports` 边 |
+
+- 生成 `defines` 边（module → class/func）
+- 生成 `calls` 边（caller → callee，static call graph）
+- 生成 `imports` 边（module → imported symbol）
+
+**输出**：code:: 节点 + 调用图边，全部 EXTRACTED。
+
+---
+
+## Pass 2：Leiden 社区发现
+
+**输入**：Pass 1 生成的完整图（含 doc 节点 + code 节点）
+
+**处理**：
+- `python-igraph` 将 NetworkX 转为 igraph 表示
+- `leidenalg.find_partition(ModularityVertexPartition)` 跑社区发现
+- 边权重 = `confidence_score × weight`（EXTRACTED 边权重最高）
+- 每个社区识别 **hub node**（社区内 degree 最高的节点）
+- Hub node label 作为社区名（可视化图例用，如 `#LangGraph (36)`）
+
+**输出**：每个节点标记 `community_id`；社区 metadata（hub node、成员数）
+
+---
+
+## Pass 3a：Embedding（INDEX-TIME ONLY）
+
+**输入**：所有文本节点
+
+**模型选项**：
+
+| 模型 | 后端 | 向量维度 | 适用场景 |
+|---|---|---|---|
+| `bge-m3` | Ollama（本地） | 1024 | 默认，支持中英文 |
+| `qwen3-embedding:8b` | Ollama（本地） | 1024 | 中文为主的内容 |
+| `text-embedding-004` | Gemini API | 768 | 云端备用 |
+
+**处理**：
+1. 给每个节点计算向量
+2. 写入 LanceDB（`embed_cache.lance`），仅作 cache
+3. SHA256 内容 hash 防止重复计算
+
+**关键约束**：向量**不在 query time 使用**（仅 Pass 3b 建边时用）
+
+---
+
+## Pass 3b：相似边生成
+
+**输入**：LanceDB 向量 cache
+
+**处理**：
+- 全局 top-K ANN 搜索（默认 K=10）
+- 对每对节点生成 `semantically_similar_to` 边
+- 置信度规则：
+  - `confidence = INFERRED`
+  - `confidence_score = 余弦相似度`
+  - 低于阈值（默认 0.5）的不生成
+
+**跨类型边**：
+- doc ↔ doc
+- code ↔ code
+- doc ↔ code（需 `--cross-modal`）
+
+---
+
+## Pass 3c：Symbol Links（doc → code）
+
+**输入**：doc 节点文本 + code 符号集合
+
+**处理**：
+- 扫描 doc 节点内容，匹配 code 符号名（精确字符串匹配）
+- 生成 `mentions_symbol` 边（doc → code）
+- 置信度 = EXTRACTED
+
+**可视化行为**：`mentions_symbol` 边默认隐藏，点击 doc 节点时按需显示（避免图面过于拥挤）
+
+---
+
+## Pass 4：持久化 + 可视化
+
+**输出文件**（存入 `.prismrag/<namespace>/`）：
+
+| 文件 | 描述 |
+|---|---|
+| `graph.json` | 完整知识图谱（nodes + edges + communities + metadata） |
+| `GRAPH_REPORT.md` | 文字统计报告（社区概览、hub nodes、边统计） |
+| `graph.html` | force-graph WebGL 交互式可视化 |
+| `embed_cache.lance/` | LanceDB 向量 cache |
+| `bm25_index/` | BM25 关键词索引 |
+
+### graph.html 可视化特性（v5.7）
+
+基于 [force-graph](https://github.com/vasturiano/force-graph)（WebGL Canvas）：
+
+| 功能 | 描述 |
+|---|---|
+| 节点焦点 | 单击节点 → 只显示该节点 + 直接邻居 |
+| Legend 多选 | 点击左侧色块 → 显示对应聚类；可叠加 |
+| 3-click 循环 | ×1 焦点节点 → ×2 选中聚类 → ×3 取消 |
+| 语义聚类命名 | legend 显示 hub node label（如 `#LangGraph (36)`）|
+| LOD 标签 | 缩放到一定级别才显示节点名，避免拥挤 |
+| 键盘控制 | WASD 平移，`+`/`-` 缩放，Escape 重置 |
+| On-demand 边 | `mentions_symbol` 默认隐藏，点击节点按需显示 |
+| 右键 Obsidian | doc 节点右键 → `obsidian://` 跳转原始笔记 |
+
+---
 
 ## 增量更新
 
-- 每个文件算 SHA256，存到 `data/cache/file_hashes.json`
-- 下次 `ingest` 时只重处理 hash 变化的文件
-- 单个文件变化触发的影响：
-  - Pass 1-3 重跑该文件
-  - Pass 4 Leiden 增量更新（不全量重算）
-  - Pass 5 报告重新生成
+- 每个文件算 SHA256，存到 `file_hashes.json`
+- 再次 ingest 时只重处理 hash 变化的文件
+- Embedding cache 按 `(node_id, content_hash)` 键控，未变化节点复用向量
+- Leiden 在图变化后全量重跑（增量 Leiden 仍在研究中）
 
-## 隐私层级
+---
 
-| 数据 | 本地处理 | 走 Gemini API |
-|---|---|---|
-| md 内容、wikilinks、frontmatter | ✅ Pass 1 | ❌ 不出本地 |
-| PDF 文本 | ✅ pypdf 本地 | ❌ |
-| 音频 | ✅ faster-whisper 本地 | ❌ |
-| 图片像素 | ❌ | ✅ Gemini Vision |
-| 文本 embedding | ❌ | ✅ Gemini Embedding 2 |
+## Query Time（零 Embedding）
 
-**默认付费层**：Gemini 免费层数据用于训练。PrismRag 默认要求付费层 API key，用户显式设置 `PRIVACY_TIER=free` 才能使用免费层，启动时会警告。
+```
+User query
+    │
+    ▼
+入口节点解析
+    ├─ label / alias 精确匹配
+    ├─ BM25 关键词搜索
+    └─ ANN 向量搜索（fallback，top-1）
+    │
+    ▼
+图遍历
+    ├─ BFS（默认，广度优先，宽上下文）
+    ├─ DFS（深度优先，单链追踪）
+    └─ path(a→b)（最短路径）
+    │
+    ▼
+Token 预算裁剪（--budget N）
+    │
+    ▼
+返回：[nodes], [edges], community_info
+```
 
-## 和 v3.2 设计的差异（简要）
+**核心性质**：
+- **无 vector search**（除 entry point fallback，且只 top-1）
+- **无 re-ranking**
+- **确定性输出**：同 query 同结果
+- **硬预算上限**：`--budget 4000` 最多返回 4000 tokens
 
-| 维度 | v3.2（传统 RAG） | v4.0（图优先） |
-|---|---|---|
-| 主存储 | LanceDB 向量库 | NetworkX + JSON |
-| 主检索路径 | Hybrid Search + RRF + cross-encoder | 图遍历 BFS/DFS |
-| Embedding 角色 | 查询时核心 | index-time 只用一次（相似边 + 多模态桥） |
-| Phase 1/2 划分 | Phase 1 基础 RAG，Phase 2 GraphRAG | Phase 1 就是完整图 |
-| 代码复杂度 | 高（多管线） | 低（单管线） |
-| LLM 依赖 | query-time re-rank | index-time 只在 Pass 2 图片描述 |
+---
 
-**完整差异对比、ADR、迁移说明**见 NimbusVault 里的 v4.0 设计文档。
+## Atomize 流程（v5.3+）
+
+针对"一个 md 文件包含多个独立知识点"的情况：
+
+```
+prism-rag atomize propose --node <id>
+    │
+    ▼ LLM（Gemini / Claude）拆分
+    │
+    ▼ 生成 atomic proposals（inbox）
+    │
+prism-rag atomize inbox          # 人工审核
+    │
+prism-rag atomize promote <id>   # 批准 → 写入图
+```
+
+- 原子节点使用 `knowledge_id` frontmatter 作为稳定 ID
+- 语义去重（v5.5）：生成前检查是否已有等价节点，避免冗余
+
+---
+
+## MCP Server（18 tools）
+
+`prism-rag serve` 启动，支持 stdio 和 SSE 两种 transport。
+
+### 检索工具
+
+| 工具 | 用途 |
+|---|---|
+| `search_knowledge` | 主检索（hybrid: BM25 + entry + BFS） |
+| `explain_node` | 返回节点详情 + 邻居概览 |
+| `trace_path` | 两节点间最短路径 |
+| `list_communities` | 列出所有社区 + hub nodes |
+| `explore_community` | 深入某个社区 |
+
+### Atomize 工具
+
+| 工具 | 用途 |
+|---|---|
+| `atomize_document` | LLM 拆分节点为原子片段 |
+| `inbox_review` | 列出待审核提案 |
+| `inbox_promote` | 批准提案写入图 |
+
+### Vault CRUD 工具（11 个）
+
+读取、创建、更新、删除 Obsidian vault 中的笔记；支持 frontmatter 操作、alias 管理等。
+
+---
+
+## 数据存储布局
+
+```
+<target>/.prismrag/<namespace>/
+├── graph.json            # 完整知识图谱
+├── GRAPH_REPORT.md       # 统计报告
+├── graph.html            # 交互式可视化
+├── file_hashes.json      # SHA256 增量 cache
+├── embed_cache.lance/    # LanceDB 向量 cache
+└── bm25_index/           # BM25 索引
+```
+
+每个 target（vault 或 repo）有自己独立的 `.prismrag/` 目录，互不干扰。
+
+---
+
+## 技术栈
+
+| 层 | 技术选型 |
+|---|---|
+| 图存储 | NetworkX + JSON |
+| 社区发现 | `leidenalg` + `python-igraph` |
+| 代码解析 | `tree-sitter` |
+| Markdown AST | `markdown-it-py` + `python-frontmatter` |
+| Embedding | Ollama `bge-m3` / `qwen3-embedding:8b`（默认）；Gemini API（备用） |
+| 向量 cache | LanceDB |
+| 关键词索引 | BM25（`rank_bm25`） |
+| 可视化 | [force-graph](https://github.com/vasturiano/force-graph)（WebGL Canvas） |
+| MCP Server | `mcp` 官方 SDK（FastMCP） |
+| 配置 | `pydantic-settings`（.env / 环境变量） |
+
+---
+
+## v6.0 展望：联邦元图
+
+> 详见 [v6.0-design.md](v6.0-design.md) 和 [v6.0-implementation-plan.md](v6.0-implementation-plan.md)
+
+核心目标：跨多个 namespace（不同 vault / repo）的统一全局视图。
+
+- **manifest.json**：每个 namespace 的元数据注册表
+- **FederatedGraph**：运行时联合多个 KnowledgeGraph 实例
+- **跨 namespace 桥接边**：共享 tag + import（确定性）→ hub node ANN（语义）
+- **联邦可视化**：namespace 超节点元图 + 下钻到单 namespace 图
+
+---
+
+*— Zengyn42 · 无垠智穹*
