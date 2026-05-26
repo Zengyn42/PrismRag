@@ -19,7 +19,15 @@ import frontmatter
 
 
 _DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset(
-    {".git", ".obsidian", ".trash", ".DS_Store", "__pycache__", "node_modules"}
+    {
+        ".git", ".obsidian", ".trash", ".DS_Store",
+        "__pycache__", "node_modules",
+        ".venv", "venv", ".env",           # Python virtual environments
+        "logs",                             # runtime log directories
+        ".pytest_cache", ".mypy_cache",    # tool caches
+        "dist", "build",                   # build artifacts
+        ".prismrag",                       # PrismRag output (avoid self-ingestion)
+    }
 )
 
 
