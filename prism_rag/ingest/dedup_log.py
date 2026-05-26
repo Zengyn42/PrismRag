@@ -12,7 +12,7 @@ Usage:
         action='reuse',
         claim_title='Fresh-per-call design decision',
         reused_id='KNOW-000043',
-        source_doc='设计细节/PrismRag v5.3.md',
+        source_doc='design-notes/PrismRag v5.3.md',
         similarity_score=0.94,
         pre_state={'mentions_edges': []},
     )

@@ -1,6 +1,6 @@
 """EdgeClassifier — three-tier promotion logic on top of CrossNamespaceProbe.
 
-See spec §三 / §五 for tier definitions and probe interaction.
+See spec §3 / §5 for tier definitions and probe interaction.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ TIER_3 = 3
 def classify_one(
     entry: CrossEdgeEntry, *, is_top_1: bool, profile: ClassifierProfile,
 ) -> int:
-    """Decide tier for one probe entry. See spec §三."""
+    """Decide tier for one probe entry. See spec §3."""
     from prism_rag.store.cross_namespace_probe import MIGRATION_PENDING
     from prism_rag.store.graph import LifecycleClass
 

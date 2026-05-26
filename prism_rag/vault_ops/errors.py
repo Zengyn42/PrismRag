@@ -1,8 +1,8 @@
 """
-Obsidian Vault MCP — 错误码与统一响应构造
+Obsidian Vault MCP — Error codes and unified response construction
 
-VaultErrorCode 枚举 + 统一的成功/错误响应格式。
-所有 tool 返回值都经过 ok() / fail() 构造，确保格式一致。
+VaultErrorCode enum + unified success/error response format.
+All tool return values are constructed via ok() / fail() to ensure consistent format.
 """
 
 from enum import Enum
@@ -22,7 +22,7 @@ class VaultErrorCode(str, Enum):
 
 
 def ok(data: dict[str, Any] | None = None, **metadata: Any) -> dict:
-    """构造成功响应。"""
+    """Construct a success response."""
     resp: dict[str, Any] = {"status": "success"}
     if data is not None:
         resp["data"] = data
@@ -36,7 +36,7 @@ def fail(
     message: str,
     **metadata: Any,
 ) -> dict:
-    """构造错误响应。"""
+    """Construct an error response."""
     resp: dict[str, Any] = {
         "status": "error",
         "error_code": code.value,

@@ -10,7 +10,7 @@ Matching levels (v5.1a — deterministic only):
 
 L2 (BM25 + graph expansion + LLM confirmation) is deferred to v5.1b.
 
-Design doc: NimbusVault/设计细节/PrismRag v5.1 — mentions_symbol 跨命名空间链接设计.md
+Design doc: NimbusVault/design_details/PrismRag v5.1 — mentions_symbol cross-namespace link design.md
 GitHub: https://github.com/Zengyn42/PrismRag/issues/10
 """
 

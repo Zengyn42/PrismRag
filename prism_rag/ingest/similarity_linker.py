@@ -3,7 +3,7 @@
 For each node, find its top-K nearest neighbors by cosine similarity,
 then create INFERRED edges for pairs above the similarity threshold.
 
-This is the core of "流派 B": embedding is used INDEX-TIME ONLY to populate
+This is the core of "Approach B": embedding is used INDEX-TIME ONLY to populate
 graph edges. Query-time retrieval is pure graph traversal — no vector search.
 
 Edges are deduplicated against existing EXTRACTED edges to avoid redundancy.

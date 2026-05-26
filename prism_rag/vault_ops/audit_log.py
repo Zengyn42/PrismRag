@@ -1,4 +1,4 @@
-"""Obsidian Vault MCP — 结构化审计日志
+"""Obsidian Vault MCP — Structured audit log
 
 All write operations append a JSONL line to data/audit.jsonl.
 Audit write is best-effort — a failed audit does not abort the main op.

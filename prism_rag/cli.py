@@ -34,7 +34,7 @@ logging.basicConfig(
 
 app = typer.Typer(
     name="prism-rag",
-    help="无垠智穹图优先 RAG 系统 (v4.0)",
+    help="Graph-first RAG system (v4.0)",
     no_args_is_help=True,
 )
 

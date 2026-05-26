@@ -1116,7 +1116,7 @@ def register_vault_tools(mcp: FastMCP) -> None:
         Returns JSON with new cas_hash, path, namespace, sections_affected, and graph_update stats.
         Returns VALIDATION_ERROR if section_heading is not found in the note.
 
-        section_heading accepts the full heading with markers (e.g. "## 决策") or just the text ("决策").
+        section_heading accepts the full heading with markers (e.g. "## Decision") or just the text ("Decision").
         Use write_note() to replace the entire file; use update_frontmatter() for YAML-only changes.
         """
         return await _patch_note_impl(path, section_heading, new_content, cas_hash, namespace)

@@ -2,7 +2,7 @@
 
 Usage:
     from prism_rag.ingest.incremental import ingest_file
-    ingest_file(Path("设计细节/new_doc.md"))
+    ingest_file(Path("design_details/new_doc.md"))
 
 What it does:
 1. Parse the file (frontmatter + AST extraction)

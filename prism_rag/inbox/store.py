@@ -1,6 +1,6 @@
 """InboxStore — JSONL-backed pending-edge queue.
 
-Schema per entry: see spec §四 (PrismRag v5.2). Append-only for new
+Schema per entry: see spec section 4 (PrismRag v5.2). Append-only for new
 entries; status updates rewrite the whole file via atomic_write.
 """
 

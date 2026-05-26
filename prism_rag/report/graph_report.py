@@ -72,20 +72,20 @@ def generate_report(
     lines: list[str] = []
 
     # ── Header ───────────────────────────────────────────────────────
-    lines.append("# NimbusVault 知识图报告")
+    lines.append("# NimbusVault Knowledge Graph Report")
     lines.append("")
-    lines.append(f"> 生成时间: `{datetime.now(timezone.utc).isoformat()}`")
+    lines.append(f"> Generated at: `{datetime.now(timezone.utc).isoformat()}`")
     if vault_root:
-        lines.append(f"> 源 vault: `{vault_root}`")
-    lines.append(f"> 节点总数: **{graph.node_count}**")
-    lines.append(f"> 边总数: **{graph.edge_count}**")
-    lines.append(f"> 社区数: **{len(graph.communities)}**")
+        lines.append(f"> Source vault: `{vault_root}`")
+    lines.append(f"> Total nodes: **{graph.node_count}**")
+    lines.append(f"> Total edges: **{graph.edge_count}**")
+    lines.append(f"> Communities: **{len(graph.communities)}**")
     lines.append("")
     lines.append("---")
     lines.append("")
 
     # ── Top God Nodes ────────────────────────────────────────────────
-    lines.append("## 全图 God Nodes（度数最高的 10 个节点）")
+    lines.append("## Global Hub Nodes (top 10 by degree)")
     lines.append("")
     top_gods = _top_nodes_by_degree(graph, limit=10)
     if top_gods:
@@ -96,11 +96,11 @@ def generate_report(
             community_id = node_data.get("community_id") or "—"
             lines.append(f"- **{label}** · `{kind}` · degree {degree} · community `{community_id}`")
     else:
-        lines.append("_（图为空）_")
+        lines.append("_(graph is empty)_")
     lines.append("")
 
     # ── Communities ──────────────────────────────────────────────────
-    lines.append("## 社区概览")
+    lines.append("## Community Overview")
     lines.append("")
     if graph.communities:
         sorted_comms = sorted(
@@ -111,18 +111,18 @@ def generate_report(
         for comm in sorted_comms:
             lines.append(f"### `{comm.id}` — {comm.label}")
             lines.append("")
-            lines.append(f"- 成员数: **{comm.member_count}**")
-            lines.append(f"- 内部密度: **{comm.internal_density}**")
+            lines.append(f"- Members: **{comm.member_count}**")
+            lines.append(f"- Internal density: **{comm.internal_density}**")
             if comm.god_nodes:
                 god_labels = [_node_label(graph, n) for n in comm.god_nodes]
                 lines.append(f"- God nodes: {', '.join(f'`{g}`' for g in god_labels)}")
             lines.append("")
     else:
-        lines.append("_（未运行社区检测）_")
+        lines.append("_(community detection has not been run)_")
         lines.append("")
 
     # ── Surprising connections ──────────────────────────────────────
-    lines.append("## 惊奇连接（跨社区高置信度边）")
+    lines.append("## Surprising Connections (high-confidence cross-community edges)")
     lines.append("")
     cross_edges = _cross_community_edges(graph)
     if cross_edges:
@@ -136,7 +136,7 @@ def generate_report(
                 f"· score {edge['score']:.2f}"
             )
     else:
-        lines.append("_（未发现跨社区的高置信度边）_")
+        lines.append("_(no high-confidence cross-community edges found)_")
     lines.append("")
 
     # ── Footer ───────────────────────────────────────────────────────

@@ -1,13 +1,13 @@
 """
-Obsidian Vault MCP — Markdown 操作
+Obsidian Vault MCP — Markdown operations
 
-功能：
-  1. Frontmatter 解析与序列化（PyYAML）
-  2. Section 分割（基于 heading 行）
-  3. Section-based patch 操作
-  4. Wikilink 提取
+Features:
+  1. Frontmatter parsing and serialization (PyYAML)
+  2. Section splitting (based on heading lines)
+  3. Section-based patch operations
+  4. Wikilink extraction
 
-不做 Markdown AST 解析 — Obsidian 方言（callouts, dataview）会破坏 AST。
+No Markdown AST parsing — Obsidian dialects (callouts, dataview) would break the AST.
 """
 
 import re
@@ -26,10 +26,10 @@ _FM_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 
 def parse_frontmatter(content: str) -> tuple[dict, str]:
     """
-    解析 YAML frontmatter。
+    Parse YAML frontmatter.
 
-    返回 (frontmatter_dict, body_without_frontmatter)。
-    无 frontmatter 时返回 ({}, original_content)。
+    Returns (frontmatter_dict, body_without_frontmatter).
+    Returns ({}, original_content) when no frontmatter is present.
     """
     m = _FM_PATTERN.match(content)
     if not m:
@@ -47,7 +47,7 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
 
 
 def serialize_frontmatter(fm: dict, body: str) -> str:
-    """将 frontmatter dict + body 合并为完整 Markdown。"""
+    """Merge a frontmatter dict and body into a complete Markdown string."""
     if not fm:
         return body
 
@@ -62,14 +62,14 @@ def serialize_frontmatter(fm: dict, body: str) -> str:
 
 
 def update_frontmatter(content: str, updates: dict) -> str:
-    """更新 frontmatter 字段（合并，不覆盖其他字段）。"""
+    """Update frontmatter fields (merge; does not overwrite other fields)."""
     fm, body = parse_frontmatter(content)
     fm.update(updates)
     return serialize_frontmatter(fm, body)
 
 
 # --------------------------------------------------------------------------
-# Section 分割
+# Section splitting
 # --------------------------------------------------------------------------
 
 _HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
@@ -77,20 +77,20 @@ _HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
 @dataclass
 class Section:
-    """一个 Heading Section。"""
-    heading: str        # 完整 heading 行，如 "## 背景"
-    level: int          # heading 层级 1-6
-    title: str          # heading 标题文字，如 "背景"
-    content: str        # heading 下的内容（不含 heading 行本身）
-    start_line: int     # 在原文中的起始行号
-    end_line: int       # 在原文中的结束行号（不含）
+    """A single heading section."""
+    heading: str        # full heading line, e.g. "## Background"
+    level: int          # heading level 1-6
+    title: str          # heading title text, e.g. "Background"
+    content: str        # content under the heading (excluding the heading line itself)
+    start_line: int     # starting line number in the original document
+    end_line: int       # ending line number in the original document (exclusive)
 
 
 def split_sections(content: str) -> list[Section]:
     """
-    按 heading 切分 Markdown 为 sections。
+    Split Markdown into sections by heading.
 
-    第一个 heading 之前的内容作为 level=0 的根 section。
+    Content before the first heading is treated as the root section with level=0.
     """
     lines = content.split("\n")
     sections: list[Section] = []
@@ -103,7 +103,7 @@ def split_sections(content: str) -> list[Section]:
     for i, line in enumerate(lines):
         m = _HEADING_PATTERN.match(line)
         if m:
-            # 保存上一个 section
+            # Save the previous section
             sections.append(Section(
                 heading=current_heading,
                 level=current_level,
@@ -112,7 +112,7 @@ def split_sections(content: str) -> list[Section]:
                 start_line=current_start,
                 end_line=i,
             ))
-            # 开始新 section
+            # Start new section
             current_heading = line
             current_level = len(m.group(1))
             current_title = m.group(2).strip()
@@ -121,7 +121,7 @@ def split_sections(content: str) -> list[Section]:
         else:
             current_lines.append(line)
 
-    # 最后一个 section
+    # Last section
     sections.append(Section(
         heading=current_heading,
         level=current_level,
@@ -136,20 +136,20 @@ def split_sections(content: str) -> list[Section]:
 
 def find_section(sections: list[Section], target_heading: str) -> int | None:
     """
-    查找匹配的 section 索引。
+    Find the index of a matching section.
 
-    target_heading 可以是：
-      - 完整 heading 行："## 背景"
-      - 仅标题文字："背景"
+    target_heading may be:
+      - A full heading line: "## Background"
+      - Just the title text: "Background"
     """
-    # 清理 target
+    # Normalize target
     target = target_heading.strip()
 
     for i, sec in enumerate(sections):
-        # 完整 heading 匹配
+        # Full heading match
         if sec.heading.strip() == target:
             return i
-        # 仅标题匹配
+        # Title-only match
         if sec.title == target:
             return i
 
@@ -157,10 +157,10 @@ def find_section(sections: list[Section], target_heading: str) -> int | None:
 
 
 def reassemble_sections(sections: list[Section]) -> str:
-    """将 sections 重新组装为完整 Markdown。"""
+    """Reassemble sections into a complete Markdown string."""
     parts: list[str] = []
     for sec in sections:
-        if sec.heading:  # 非 root section
+        if sec.heading:  # non-root section
             parts.append(sec.heading)
         if sec.content:
             parts.append(sec.content)
@@ -169,14 +169,14 @@ def reassemble_sections(sections: list[Section]) -> str:
 
 
 # --------------------------------------------------------------------------
-# Wikilink 提取
+# Wikilink extraction
 # --------------------------------------------------------------------------
 
 _WIKILINK_PATTERN = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 
 
 def extract_wikilinks(content: str) -> list[str]:
-    """提取所有 [[wikilink]] 目标（去重，保留顺序）。"""
+    """Extract all [[wikilink]] targets (deduplicated, order preserved)."""
     seen: set[str] = set()
     result: list[str] = []
     for m in _WIKILINK_PATTERN.finditer(content):
@@ -188,15 +188,15 @@ def extract_wikilinks(content: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# Tag 提取
+# Tag extraction
 # --------------------------------------------------------------------------
 
 _TAG_PATTERN = re.compile(r"(?:^|\s)#([a-zA-Z\u4e00-\u9fff][\w\u4e00-\u9fff/\-]*)", re.MULTILINE)
 
 
 def extract_tags(content: str) -> list[str]:
-    """提取所有 #tag（去重，保留顺序）。不含 heading 中的 #。"""
-    # 先移除 frontmatter
+    """Extract all #tags (deduplicated, order preserved). Excludes # used in headings."""
+    # Strip frontmatter first
     _, body = parse_frontmatter(content)
 
     seen: set[str] = set()

@@ -205,7 +205,7 @@ def search_knowledge(
     mode="bfs" for broad topic context; mode="dfs" to follow call/reference chains.
     ontology_type filters to a specific type e.g. "decision", "concept", "fact" (see prismrag://schema).
 
-    如果你已有 KNOW-ID（如 'KNOW-000008'），请改用 explain_node 直接读取，不要用此工具做 ID 查找。
+    If you already have a KNOW-ID (e.g. 'KNOW-000008'), use explain_node to read it directly instead of using this tool for ID lookup.
     """
     import re as _re
     # P2: soft hint — pure KNOW-ID queries must use explain_node, not semantic search.
@@ -217,14 +217,14 @@ def search_knowledge(
         kid_upper = _kid_match.group(1).upper()
         if len(digits) >= 6:
             hint_msg = (
-                f"⚠️ 未执行搜索。检测到精确节点 ID 格式（{kid_upper}），"
-                f"请立即调用 explain_node(node='{kid_upper}') 查询此节点。"
-                "results 为空不代表该知识不存在。"
+                f"⚠️ Search not executed. Exact node ID format detected ({kid_upper}). "
+                f"Call explain_node(node='{kid_upper}') directly to retrieve this node. "
+                "Empty results do not mean the knowledge does not exist."
             )
         else:
             hint_msg = (
-                f"⚠️ 未执行搜索。检测到疑似节点 ID 但格式不完整（{kid_upper}，"
-                "KNOW-ID 至少需要 6 位数字），请确认完整 ID 后调用 explain_node。"
+                f"⚠️ Search not executed. Suspected node ID detected but format is incomplete ({kid_upper}). "
+                "KNOW-IDs require at least 6 digits. Confirm the full ID then call explain_node."
             )
         return json.dumps({"hint": hint_msg, "results": []}, ensure_ascii=False)
 
@@ -311,8 +311,8 @@ def search_knowledge(
 
 @mcp.tool()
 def explain_node(node: str, scope: str = "") -> str:
-    """根据节点 ID 或名称读取完整节点内容及邻边。当你持有 KNOW-NNNNNN ID 时，必须使用此工具，
-    而非 search_knowledge——语义搜索无法可靠匹配数字 ID。
+    """Read full node content and edges by node ID or name. When you have a KNOW-NNNNNN ID, you MUST use this tool
+    instead of search_knowledge — semantic search cannot reliably match numeric IDs.
 
     Returns JSON with node metadata, outgoing_edges list, incoming_edges list, and community info.
     Does NOT rank or filter edges — returns everything. Use search_knowledge() for ranked traversal from a starting point.
@@ -326,20 +326,20 @@ def explain_node(node: str, scope: str = "") -> str:
     if not entries:
         # P2: if KNOW-ID is embedded in a longer string, auto-extract and retry.
         # This prevents the explain→error→retry→error dead loop when the LLM
-        # passes extra context alongside the ID (e.g. "KNOW-000032 的内容是什么？").
+        # passes extra context alongside the ID (e.g. "What is the content of KNOW-000032?").
         _embedded = _re.search(r'KNOW-(\d{6,})', node, _re.IGNORECASE)
         if _embedded:
             clean_id = f"KNOW-{_embedded.group(1).upper()}"
             entries = resolve_entry_points(fg, clean_id, scope=scope or None)
             if not entries:
                 return json.dumps({
-                    "error": f"节点 {clean_id} 不存在于图中。请确认 ID 正确，或使用 search_knowledge 进行语义搜索。"
+                    "error": f"Node {clean_id} does not exist in the graph. Verify the ID is correct, or use search_knowledge for semantic search."
                 }, ensure_ascii=False)
         else:
             return json.dumps({
                 "error": (
-                    f"未找到精确匹配的节点：{node!r}。"
-                    "若需语义搜索请使用 search_knowledge。"
+                    f"No exact matching node found: {node!r}. "
+                    "Use search_knowledge for semantic search."
                 )
             }, ensure_ascii=False)
 

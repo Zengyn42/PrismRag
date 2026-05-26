@@ -1,14 +1,14 @@
 """
-Obsidian Vault MCP — CAS (Compare-And-Swap) 乐观锁
+Obsidian Vault MCP — CAS (Compare-And-Swap) optimistic locking
 
-基于 content hash (SHA-256) 的乐观锁机制：
-  - read 时计算 hash 返回给调用方
-  - write 时比对 hash，不匹配则拒绝写入
-  - mtime 仅做快路径短路（mtime 未变 → 跳过 hash 计算）
+Content hash (SHA-256) based optimistic locking mechanism:
+  - On read: compute hash and return it to the caller
+  - On write: compare hash; reject the write if it does not match
+  - mtime is used only as a fast-path short-circuit (mtime unchanged → skip hash computation)
 
-并发保护：
-  - Dict[path, asyncio.Lock] 按文件路径加锁
-  - 单文件级粒度，不影响其他文件操作
+Concurrency protection:
+  - Dict[path, asyncio.Lock] keyed by file path
+  - Single-file granularity; does not affect operations on other files
 """
 
 import asyncio
@@ -16,12 +16,12 @@ import hashlib
 from pathlib import Path
 
 
-# 文件级锁：path_str -> asyncio.Lock
+# File-level locks: path_str -> asyncio.Lock
 _file_locks: dict[str, asyncio.Lock] = {}
 
 
 def get_file_lock(path: Path) -> asyncio.Lock:
-    """获取文件级 asyncio.Lock（懒创建）。"""
+    """Return a file-level asyncio.Lock for the given path (lazily created)."""
     key = str(path)
     if key not in _file_locks:
         _file_locks[key] = asyncio.Lock()
@@ -29,19 +29,19 @@ def get_file_lock(path: Path) -> asyncio.Lock:
 
 
 def compute_hash(content: str | bytes) -> str:
-    """计算内容 SHA-256 摘要。"""
+    """Compute the SHA-256 digest of the given content."""
     if isinstance(content, str):
         content = content.encode("utf-8")
     return hashlib.sha256(content).hexdigest()
 
 
 def compute_file_hash(path: Path) -> str:
-    """计算文件内容的 SHA-256 摘要。"""
+    """Compute the SHA-256 digest of the file at the given path."""
     return compute_hash(path.read_bytes())
 
 
 def get_mtime_ms(path: Path) -> int:
-    """获取文件 mtime（毫秒）。"""
+    """Return the file modification time in milliseconds."""
     return int(path.stat().st_mtime * 1000)
 
 
@@ -50,24 +50,24 @@ def verify_cas(
     expected_hash: str | None,
 ) -> tuple[bool, str]:
     """
-    验证 CAS 条件。
+    Verify CAS preconditions.
 
-    返回 (is_valid, actual_hash)。
-    - expected_hash is None 且文件不存在 → 新建场景，valid
-    - expected_hash is None 且文件已存在 → conflict（已存在）
-    - expected_hash 匹配 → valid
-    - expected_hash 不匹配 → conflict
+    Returns (is_valid, actual_hash).
+    - expected_hash is None and file does not exist → create scenario, valid
+    - expected_hash is None and file already exists → conflict (already exists)
+    - expected_hash matches → valid
+    - expected_hash does not match → conflict
     """
     exists = path.exists()
 
     if expected_hash is None:
         if exists:
             actual = compute_file_hash(path)
-            return False, actual  # 已存在，conflict
-        return True, ""  # 新建，valid
+            return False, actual  # already exists, conflict
+        return True, ""  # create scenario, valid
 
     if not exists:
-        return False, ""  # 文件不存在，expected_hash 无法匹配
+        return False, ""  # file does not exist, expected_hash cannot match
 
     actual = compute_file_hash(path)
     return actual == expected_hash, actual
