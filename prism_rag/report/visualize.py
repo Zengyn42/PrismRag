@@ -1,25 +1,25 @@
-"""Generate an interactive HTML knowledge graph visualization using force-graph.
+"""Generate an interactive HTML knowledge graph visualization using 3d-force-graph.
 
 Produces a standalone graph.html file that can be opened in any browser.
 
 Visual encoding:
 - Node size: proportional to structural degree (larger = more connected)
 - Node color: mapped to community_id (distinct hue per cluster)
-- Node glow: soft halo in node color (WebGL canvas)
+- Node label: SpriteText floating above node (hidden for dimmed nodes)
 - Edge particles: animated flow on wiki-link / cross-namespace edges
 - Edge color: EXTRACTED=bright, INFERRED=semi-transparent
 - On-demand edges (e.g. mentions_symbol): shown only on node click (toggle)
 
 Interaction:
-- Scroll/pinch: zoom (labels appear progressively as you zoom in — LOD)
-- Drag background: pan
+- Mouse drag: orbit / rotate
+- Scroll / pinch: zoom
 - Drag node: reposition
 - Click node: toggle mentions_symbol edges + open in Obsidian / portal
 - Click background: clear selection
 - Search box: highlight matching nodes
 - URL hash (#NODE-ID): auto-focuses that node after layout stabilizes
 
-Renderer: vasturiano/force-graph (D3-force + HTML5 Canvas, CDN)
+Renderer: vasturiano/3d-force-graph (Three.js WebGL, CDN)
 """
 
 from __future__ import annotations
@@ -213,13 +213,14 @@ _HTML_TEMPLATE = """\
         <button id="btn-reset">⟳ Reset all</button>
 
         <div class="leg-section">Controls</div>
+        <div class="leg-row"><kbd>drag</kbd>&nbsp;orbit / rotate</div>
+        <div class="leg-row"><kbd>scroll</kbd>&nbsp;zoom</div>
         <div class="leg-row"><kbd>click ×1</kbd>&nbsp;focus node</div>
         <div class="leg-row"><kbd>click ×2</kbd>&nbsp;+ select legend type</div>
         <div class="leg-row"><kbd>click ×3</kbd>&nbsp;clear node, keep legend</div>
         <div class="leg-row"><kbd>click bg</kbd>&nbsp;clear node focus</div>
         <div class="leg-row"><kbd>right-click</kbd>&nbsp;open Obsidian</div>
         <div class="leg-row"><kbd>Esc</kbd>&nbsp;reset everything</div>
-        <div class="leg-row"><kbd>WASD</kbd>&nbsp;pan &nbsp;<kbd>+</kbd><kbd>-</kbd>&nbsp;zoom</div>
 
         <div class="leg-section">Node — Code</div>
         <div class="leg-row leg-filter" data-color="#4363d8"><span class="swatch" style="background:#4363d8"></span>function</div>
@@ -277,7 +278,8 @@ _HTML_TEMPLATE = """\
     <div id="info-hint"></div>
   </div>
 
-  <script src="https://unpkg.com/force-graph@1/dist/force-graph.min.js"></script>
+  <script src="https://unpkg.com/3d-force-graph@1/dist/3d-force-graph.min.js"></script>
+  <script src="https://unpkg.com/three-spritetext"></script>
   <script>
   (function () {{
     var GD = {graph_data_json};
@@ -325,7 +327,7 @@ _HTML_TEMPLATE = """\
     function _refresh() {{
       _focusSet = _computeFocusSet();
       GD.nodes.forEach(function (n) {{ n._dimmed = _focusSet ? !_focusSet[n.id] : false; }});
-      Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
+      Graph.nodeVisibility(function (n) {{ return !n._dimmed; }});
       Graph.linkVisibility(_linkVisible);
     }}
 
@@ -381,10 +383,6 @@ _HTML_TEMPLATE = """\
       var el = document.getElementById(id);
       if (el) el.textContent = val || '';
     }}
-    function _setVisible(id, show) {{
-      var el = document.getElementById(id);
-      if (el) el.style.display = show ? '' : 'none';
-    }}
 
     function _showInfo(node) {{
       var hasMentions = GD.links.some(function (l) {{
@@ -439,14 +437,27 @@ _HTML_TEMPLATE = """\
       document.getElementById('info').style.display = 'block';
     }}
 
+    /* -- Node label sprite (3D) --------------------------------------------- */
+    function _makeSprite(node) {{
+      var sp = new SpriteText(node.label || '');
+      sp.material.depthWrite = false;
+      sp.color = '{font_color}';
+      sp.textHeight = 4;
+      sp.padding = 1;
+      return sp;
+    }}
+
     /* -- Build graph -------------------------------------------------------- */
-    var Graph = ForceGraph()(document.getElementById('graph'))
+    var Graph = ForceGraph3D()(document.getElementById('graph'))
       .backgroundColor('{bg_color}')
       .width(window.innerWidth)
       .height(window.innerHeight)
       .graphData(GD)
       .nodeId('id')
       .nodeVal('val')
+      .nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }})
+      .nodeThreeObject(_makeSprite)
+      .nodeThreeObjectExtend(true)
       .linkColor('color')
       .linkWidth('width')
       .linkVisibility(_linkVisible)
@@ -454,52 +465,6 @@ _HTML_TEMPLATE = """\
       .linkDirectionalParticleSpeed(0.005)
       .linkDirectionalParticleWidth(2.5)
       .linkDirectionalParticleColor('color')
-      .nodeCanvasObjectMode(function () {{ return 'replace'; }})
-      .nodeCanvasObject(function (node, ctx, globalScale) {{
-        var r = Math.sqrt(Math.max(1, node.val)) * 4;
-        var baseCol = _origColors[node.id] || '#888888';
-        var col = (node._dimmed) ? baseCol + '18' : baseCol;
-
-        /* Glow halo */
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, r * 2.2, 0, 2 * Math.PI);
-        ctx.fillStyle = baseCol + (node._dimmed ? '08' : '28');
-        ctx.fill();
-
-        /* Node circle */
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
-        ctx.fillStyle = col;
-        ctx.fill();
-
-        /* Active ring */
-        if (_activeNode === node.id) {{
-          ctx.beginPath();
-          ctx.arc(node.x, node.y, r + 3, 0, 2 * Math.PI);
-          ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-          ctx.lineWidth = 1.5 / globalScale;
-          ctx.stroke();
-        }}
-
-        /* LOD label — only for focused/visible nodes, hidden when dimmed */
-        if (!node._dimmed && globalScale > 0.45) {{
-          var fontSize = Math.min(14, Math.max(8, 11 / globalScale));
-          ctx.font = fontSize + 'px monospace';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
-          ctx.fillStyle = '{font_color}';
-          ctx.globalAlpha = Math.min(1, (globalScale - 0.45) / 0.3);
-          ctx.fillText((node.label || '').substring(0, 24), node.x, node.y + r + 2);
-          ctx.globalAlpha = 1;
-        }}
-      }})
-      .nodePointerAreaPaint(function (node, color, ctx) {{
-        var r = Math.sqrt(Math.max(1, node.val)) * 4;
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
-        ctx.fillStyle = color;
-        ctx.fill();
-      }})
       .nodeLabel(function (node) {{ return node.tooltip || node.label || node.id; }})
       .onNodeClick(function (node) {{
         if (_activeNode !== node.id) {{
@@ -562,7 +527,7 @@ _HTML_TEMPLATE = """\
           n._dimmed = !match;
         }});
       }}
-      Graph.nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }});
+      Graph.nodeVisibility(function (n) {{ return !n._dimmed; }});
       Graph.linkVisibility(_linkVisible);
     }});
 
@@ -584,69 +549,15 @@ _HTML_TEMPLATE = """\
       arrow.textContent = collapsed ? '▸' : '▾';
     }});
 
-    /* -- Keyboard controls -------------------------------------------------- */
-    /* WASD / arrow keys: pan   |   +/=/-: zoom   |   Escape: reset focus     */
-    var _keys = {{}};
-    var _rafId = null;
-
-    var _MOVE_KEYS = ['w','W','a','A','s','S','d','D',
-                      'ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
-
-    function _keyLoop() {{
-      var speed = 6 / (Graph.zoom() || 1);  /* faster when zoomed out */
-      var dx = 0, dy = 0;
-      if (_keys['w'] || _keys['W'] || _keys['ArrowUp'])    dy -= speed;
-      if (_keys['s'] || _keys['S'] || _keys['ArrowDown'])  dy += speed;
-      if (_keys['a'] || _keys['A'] || _keys['ArrowLeft'])  dx -= speed;
-      if (_keys['d'] || _keys['D'] || _keys['ArrowRight']) dx += speed;
-      if (dx !== 0 || dy !== 0) {{
-        var c = Graph.centerAt();
-        Graph.centerAt(c.x + dx, c.y + dy);
-      }}
-      var anyHeld = _MOVE_KEYS.some(function (k) {{ return _keys[k]; }});
-      _rafId = anyHeld ? requestAnimationFrame(_keyLoop) : null;
-    }}
-
+    /* -- Keyboard: Escape resets focus -------------------------------------- */
     window.addEventListener('keydown', function (e) {{
-      /* Ignore keyboard shortcuts when typing in search box */
       if (document.activeElement === document.getElementById('search')) return;
-
-      /* Zoom */
-      if (e.key === '+' || e.key === '=' || e.key === 'NumpadAdd') {{
-        e.preventDefault();
-        Graph.zoom(Graph.zoom() * 1.25, 150);
-        return;
-      }}
-      if (e.key === '-' || e.key === '_' || e.key === 'NumpadSubtract') {{
-        e.preventDefault();
-        Graph.zoom(Graph.zoom() / 1.25, 150);
-        return;
-      }}
-
-      /* Escape: clear everything — node focus + all legend selections */
       if (e.key === 'Escape') {{
         _activeNode = null;
         _nodeClickCount = 0;
         _clearAllLegend();
         _refresh();
         document.getElementById('info').style.display = 'none';
-        return;
-      }}
-
-      /* Pan */
-      if (_MOVE_KEYS.indexOf(e.key) !== -1) {{
-        e.preventDefault();
-        _keys[e.key] = true;
-        if (!_rafId) _rafId = requestAnimationFrame(_keyLoop);
-      }}
-    }});
-
-    window.addEventListener('keyup', function (e) {{
-      delete _keys[e.key];
-      /* Stop loop if no move keys held */
-      if (_rafId && !_MOVE_KEYS.some(function (k) {{ return _keys[k]; }})) {{
-        cancelAnimationFrame(_rafId);
-        _rafId = null;
       }}
     }});
 
@@ -657,10 +568,16 @@ _HTML_TEMPLATE = """\
       Graph.onEngineStop(function () {{
         if (_focused) return;
         var node = GD.nodes.find(function (n) {{ return n.id === hashId; }});
-        if (node && node.x !== undefined) {{
+        if (node && node.x !== undefined && node.y !== undefined) {{
           _focused = true;
-          Graph.centerAt(node.x, node.y, 800);
-          Graph.zoom(5, 800);
+          var dist = 300;
+          var mag  = Math.hypot(node.x || 1, node.y || 1, node.z || 1);
+          var k    = 1 + dist / mag;
+          Graph.cameraPosition(
+            {{ x: node.x * k, y: node.y * k, z: node.z * k }},
+            node,
+            1000
+          );
         }}
       }});
     }}
@@ -928,7 +845,7 @@ def generate_html(
     output_path.write_text(html, encoding="utf-8")
 
     logger.info(
-        "[visualize] saved force-graph HTML to %s "
+        "[visualize] saved 3d-force-graph HTML to %s "
         "(%d nodes, %d structural + %d on-demand links)",
         output_path, len(nodes), len(links), len(od_links),
     )
