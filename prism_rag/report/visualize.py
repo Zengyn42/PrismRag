@@ -223,10 +223,15 @@ _HTML_TEMPLATE = """\
 
         <div class="leg-section">Node — Code</div>
         <div class="leg-row leg-filter" data-color="#4363d8"><span class="swatch" style="background:#4363d8"></span>function</div>
+        <div class="leg-row leg-filter" data-color="#6a8fd8"><span class="swatch" style="background:#6a8fd8"></span>method</div>
         <div class="leg-row leg-filter" data-color="#911eb4"><span class="swatch" style="background:#911eb4"></span>class</div>
         <div class="leg-row leg-filter" data-color="#f58231"><span class="swatch" style="background:#f58231"></span>module</div>
         <div class="leg-row leg-filter" data-color="#42d4f4"><span class="swatch" style="background:#42d4f4"></span>flow</div>
         <div class="leg-row leg-filter" data-color="#5a7fa8"><span class="swatch" style="background:#5a7fa8"></span>external / stdlib</div>
+        <div class="leg-section">Node — Test</div>
+        <div class="leg-row leg-filter" data-color="#2e8b57"><span class="swatch" style="background:#2e8b57"></span>test function / method</div>
+        <div class="leg-row leg-filter" data-color="#7dbf7d"><span class="swatch" style="background:#7dbf7d"></span>test class</div>
+        <div class="leg-row leg-filter" data-color="#b5d89a"><span class="swatch" style="background:#b5d89a"></span>test module</div>
 
         <div class="leg-section">Node — Docs</div>
         {community_legend_html}
