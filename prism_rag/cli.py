@@ -833,19 +833,6 @@ def ingest_project(
     else:
         typer.secho("   No markdown files found, skipping.", fg=typer.colors.YELLOW)
 
-    # ── Pass 2: Leiden clustering ──
-    if skip_cluster:
-        typer.secho("\n⏭  Pass 2: Leiden clustering (skipped)", fg=typer.colors.YELLOW)
-    else:
-        typer.secho("\n🧠 Pass 2: Leiden community detection...", fg=typer.colors.BLUE)
-        n_communities = run_leiden(
-            graph,
-            resolution=settings.leiden_resolution,
-            seed=settings.leiden_seed,
-            god_nodes_per_community=settings.god_nodes_per_community,
-        )
-        typer.echo(f"   Communities: {n_communities}")
-
     # ── Pass 3a: Embedding ──
     vectors: dict = {}
     if skip_embed:
@@ -872,6 +859,19 @@ def ingest_project(
         typer.echo(f"   Similarity edges added: {n_sim} · Total edges: {graph.edge_count}")
     else:
         typer.secho("\n⏭  Pass 3b: Similarity edges (skipped — no vectors)", fg=typer.colors.YELLOW)
+
+    # ── Pass 2: Leiden clustering (after similarity edges so doc nodes are connected) ──
+    if skip_cluster:
+        typer.secho("\n⏭  Pass 2: Leiden clustering (skipped)", fg=typer.colors.YELLOW)
+    else:
+        typer.secho("\n🧠 Pass 2: Leiden community detection...", fg=typer.colors.BLUE)
+        n_communities = run_leiden(
+            graph,
+            resolution=settings.leiden_resolution,
+            seed=settings.leiden_seed,
+            god_nodes_per_community=settings.god_nodes_per_community,
+        )
+        typer.echo(f"   Communities: {n_communities}")
 
     # ── Pass 3c: Symbol links (mentions_symbol: doc → code) ──
     typer.secho("\n🔗 Pass 3c: Linking doc mentions → code symbols...", fg=typer.colors.BLUE)

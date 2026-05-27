@@ -841,12 +841,18 @@ def generate_html(
     # ── Community legend: group doc nodes by rendered color ──────────────────
     # Multiple community_ids may map to the same color (12-color palette wraps
     # over 95 communities). Count by actual color so numbers reflect real sizes.
-    # For each color we pick the hub node (highest degree) as the cluster name.
+    # For each color we pick the hub node (highest degree doc node) as the cluster name.
+    # Only "note" and "knowledge" kinds qualify — tag nodes are excluded to prevent
+    # high-degree tags (e.g. tag:Ollama) from stealing the label.
+    _DOC_KINDS = {"note", "knowledge"}
     color_counts: dict[str, int] = {}
     color_hub: dict[str, tuple[int, str]] = {}  # color → (max_degree, hub_label)
     for node_entry in nodes:
         kind_ = node_entry.get("kind", "")
         nid_ = node_entry.get("id", "")
+        # Only count genuine doc nodes; skip code, tags, portals
+        if kind_ not in _DOC_KINDS:
+            continue
         if kind_ in _KIND_COLORS or kind_ == "context_ref" or nid_.startswith("code::"):
             continue
         c = node_entry.get("color", "")
