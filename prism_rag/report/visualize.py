@@ -52,10 +52,12 @@ _COMMUNITY_COLORS = [
 
 # ── Kind → color overrides ────────────────────────────────────────────────────
 _KIND_COLORS: dict[str, str] = {
-    "function":    "#4363d8",
-    "test":        "#2e8b57",
-    "class":       "#911eb4",
-    "module":      "#f58231",
+    "function":    "#4363d8",  # blue
+    "test":        "#2e8b57",  # green
+    "class":       "#911eb4",  # purple
+    "test_class":  "#7dbf7d",  # light green
+    "module":      "#f58231",  # orange
+    "test_module": "#b5d89a",  # pale green
     "flow":        "#42d4f4",
     "context_ref": "#F5A623",
 }

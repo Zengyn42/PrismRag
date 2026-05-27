@@ -187,7 +187,7 @@ def _parse_file(
 
     module_node = TreeNode(
         id=module_id,
-        kind="module",
+        kind="test_module" if rel_path.stem.startswith("test_") else "module",
         label=rel_path.stem,
         content=module_content,
         namespace="code",
@@ -264,7 +264,7 @@ def _parse_class(
 
     class_node = TreeNode(
         id=class_id,
-        kind="class",
+        kind="test_class" if class_name.startswith("Test") else "class",
         label=class_name,
         content=class_content,
         namespace="code",
