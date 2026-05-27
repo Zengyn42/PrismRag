@@ -194,7 +194,7 @@ _HTML_TEMPLATE = """\
     }}
     #info-title {{ font-size: 14px; color: #fff; margin-bottom: 5px; word-break: break-all; font-weight: bold; }}
     #info-meta {{ color: rgba(255,255,255,0.5); font-size: 11px; }}
-    #info-file {{ color: rgba(120,200,255,0.7); margin-top: 3px; font-size: 11px; word-break: break-all; }}
+    #info-file {{ color: rgba(120,200,255,0.7); margin-top: 3px; font-size: 11px; word-break: break-all; white-space: pre-wrap; max-height: 200px; overflow-y: auto; }}
     #info-sig {{ color: rgba(255,255,255,0.45); margin-top: 3px; font-size: 11px; font-style: italic; }}
     #info-hint {{ color: rgba(255,200,80,0.6); margin-top: 5px; font-size: 10px; }}
   </style>
@@ -399,8 +399,32 @@ _HTML_TEMPLATE = """\
         '  degree: ' + (node.degree || 0) +
         (node.community ? '  cluster: ' + node.community : '')
       );
-      _setText('info-file', node.source_file || '');
-      _setText('info-sig', node.sig || '');
+
+      /* -- Tag nodes: show list of tagged nodes instead of file/sig -- */
+      if (node.kind === 'tag') {{
+        var nodeMap = {{}};
+        GD.nodes.forEach(function (n) {{ nodeMap[n.id] = n; }});
+        var tagged = [];
+        GD.links.forEach(function (l) {{
+          if (l._onDemand) return;
+          var s = typeof l.source === 'object' ? l.source.id : l.source;
+          var t = typeof l.target === 'object' ? l.target.id : l.target;
+          var other = null;
+          if (s === node.id) other = nodeMap[t];
+          else if (t === node.id) other = nodeMap[s];
+          if (other && other.kind !== 'tag') tagged.push(other.label || other.id);
+        }});
+        tagged.sort();
+        var listText = tagged.length
+          ? 'Tagged nodes (' + tagged.length + '):\n• ' + tagged.join('\n• ')
+          : 'No tagged nodes';
+        _setText('info-file', listText);
+        _setText('info-sig', '');
+      }} else {{
+        _setText('info-file', node.source_file || '');
+        _setText('info-sig', node.sig || '');
+      }}
+
       var hint = '';
       if (hasMentions) {{
         hint = (_activeNode === node.id)
