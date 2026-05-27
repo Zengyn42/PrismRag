@@ -1,25 +1,17 @@
-"""Generate an interactive HTML knowledge graph visualization using 3d-force-graph.
+"""Generate an interactive HTML knowledge graph visualization.
 
-Produces a standalone graph.html file that can be opened in any browser.
+Supports two render modes (controlled by ``use_3d`` parameter):
 
-Visual encoding:
-- Node size: proportional to structural degree (larger = more connected)
-- Node color: mapped to community_id (distinct hue per cluster)
-- Node label: SpriteText floating above node (hidden for dimmed nodes)
-- Edge particles: animated flow on wiki-link / cross-namespace edges
-- Edge color: EXTRACTED=bright, INFERRED=semi-transparent
-- On-demand edges (e.g. mentions_symbol): shown only on node click (toggle)
+  2D (default, use_3d=False):
+      vasturiano/force-graph — D3-force + HTML5 Canvas
+      LOD node labels, glow halos, WASD pan, +/- zoom.
 
-Interaction:
-- Mouse drag: orbit / rotate
-- Scroll / pinch: zoom
-- Drag node: reposition
-- Click node: toggle mentions_symbol edges + open in Obsidian / portal
-- Click background: clear selection
-- Search box: highlight matching nodes
-- URL hash (#NODE-ID): auto-focuses that node after layout stabilizes
+  3D (use_3d=True):
+      vasturiano/3d-force-graph — Three.js WebGL
+      Mouse-drag orbit, scroll zoom, default sphere nodes.
 
-Renderer: vasturiano/3d-force-graph (Three.js WebGL, CDN)
+Both modes share the same data pipeline, focus/dimming logic, legend,
+search box, info panel, and on-demand edge system.
 """
 
 from __future__ import annotations
@@ -80,9 +72,250 @@ _PARTICLE_RELATIONS = frozenset({
     "cross_namespace",
 })
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Mode-specific blocks  (substituted via str.replace AFTER .format())
+# These strings contain real JS { } — no Python-format escaping needed.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_CDN_2D = (
+    '  <script src="https://unpkg.com/force-graph@1'
+    '/dist/force-graph.min.js"></script>'
+)
+_CDN_3D = (
+    '  <script src="https://unpkg.com/3d-force-graph@1'
+    '/dist/3d-force-graph.min.js"></script>'
+)
+
+# ── Controls legend rows ──────────────────────────────────────────────────────
+_CONTROLS_2D = """\
+        <div class="leg-row"><kbd>drag</kbd>&nbsp;pan</div>
+        <div class="leg-row"><kbd>scroll</kbd>&nbsp;zoom</div>
+        <div class="leg-row"><kbd>click ×1</kbd>&nbsp;focus node</div>
+        <div class="leg-row"><kbd>click ×2</kbd>&nbsp;+ select legend type</div>
+        <div class="leg-row"><kbd>click ×3</kbd>&nbsp;clear node, keep legend</div>
+        <div class="leg-row"><kbd>click bg</kbd>&nbsp;clear node focus</div>
+        <div class="leg-row"><kbd>right-click</kbd>&nbsp;open Obsidian</div>
+        <div class="leg-row"><kbd>Esc</kbd>&nbsp;reset everything</div>
+        <div class="leg-row"><kbd>WASD</kbd>&nbsp;pan &nbsp;<kbd>+</kbd><kbd>-</kbd>&nbsp;zoom</div>"""
+
+_CONTROLS_3D = """\
+        <div class="leg-row"><kbd>drag</kbd>&nbsp;orbit / rotate</div>
+        <div class="leg-row"><kbd>scroll</kbd>&nbsp;zoom</div>
+        <div class="leg-row"><kbd>click ×1</kbd>&nbsp;focus node</div>
+        <div class="leg-row"><kbd>click ×2</kbd>&nbsp;+ select legend type</div>
+        <div class="leg-row"><kbd>click ×3</kbd>&nbsp;clear node, keep legend</div>
+        <div class="leg-row"><kbd>click bg</kbd>&nbsp;clear node focus</div>
+        <div class="leg-row"><kbd>right-click</kbd>&nbsp;open Obsidian</div>
+        <div class="leg-row"><kbd>Esc</kbd>&nbsp;reset everything</div>"""
+
+# ── Graph constructor name ────────────────────────────────────────────────────
+_GRAPH_CTOR_2D = "ForceGraph"
+_GRAPH_CTOR_3D = "ForceGraph3D"
+
+# ── Renderer-specific chain methods (inserted between .nodeVal and .nodeLabel) ─
+# 2D: link methods + canvas drawing.  Uses _FONT_COLOR JS variable (set in tmpl).
+_NODE_RENDER_2D = """\
+      .linkColor('color')
+      .linkWidth('width')
+      .linkVisibility(_linkVisible)
+      .linkDirectionalParticles('particles')
+      .linkDirectionalParticleSpeed(0.005)
+      .linkDirectionalParticleWidth(2.5)
+      .linkDirectionalParticleColor('color')
+      .nodeCanvasObjectMode(function () { return 'replace'; })
+      .nodeCanvasObject(function (node, ctx, globalScale) {
+        var r = Math.sqrt(Math.max(1, node.val)) * 4;
+        var baseCol = _origColors[node.id] || '#888888';
+        var col = (node._dimmed) ? baseCol + '18' : baseCol;
+
+        /* Glow halo */
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r * 2.2, 0, 2 * Math.PI);
+        ctx.fillStyle = baseCol + (node._dimmed ? '08' : '28');
+        ctx.fill();
+
+        /* Node circle */
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+        ctx.fillStyle = col;
+        ctx.fill();
+
+        /* Active ring */
+        if (_activeNode === node.id) {
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r + 3, 0, 2 * Math.PI);
+          ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+          ctx.lineWidth = 1.5 / globalScale;
+          ctx.stroke();
+        }
+
+        /* LOD label — hidden when dimmed */
+        if (!node._dimmed && globalScale > 0.45) {
+          var fontSize = Math.min(14, Math.max(8, 11 / globalScale));
+          ctx.font = fontSize + 'px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillStyle = _FONT_COLOR;
+          ctx.globalAlpha = Math.min(1, (globalScale - 0.45) / 0.3);
+          ctx.fillText((node.label || '').substring(0, 24), node.x, node.y + r + 2);
+          ctx.globalAlpha = 1;
+        }
+      })
+      .nodePointerAreaPaint(function (node, color, ctx) {
+        var r = Math.sqrt(Math.max(1, node.val)) * 4;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+        ctx.fillStyle = color;
+        ctx.fill();
+      })"""
+
+# 3D: nodeColor + link methods only (no canvas).
+_NODE_RENDER_3D = """\
+      .nodeColor(function (n) { return _origColors[n.id] || '#888888'; })
+      .linkColor('color')
+      .linkWidth('width')
+      .linkVisibility(_linkVisible)
+      .linkDirectionalParticles('particles')
+      .linkDirectionalParticleSpeed(0.005)
+      .linkDirectionalParticleWidth(2.5)
+      .linkDirectionalParticleColor('color')"""
+
+# ── _refresh() body ───────────────────────────────────────────────────────────
+_REFRESH_CALL_2D = """\
+      Graph.nodeColor(function (n) { return _origColors[n.id] || '#888888'; });
+      Graph.linkVisibility(_linkVisible);"""
+
+_REFRESH_CALL_3D = """\
+      Graph.nodeVisibility(function (n) { return !n._dimmed; });
+      Graph.linkVisibility(_linkVisible);"""
+
+# ── Keyboard section ──────────────────────────────────────────────────────────
+_KEYBOARD_2D = """\
+    /* -- Keyboard controls -------------------------------------------------- */
+    /* WASD / arrow keys: pan   |   +/=/-: zoom   |   Escape: reset focus     */
+    var _keys = {};
+    var _rafId = null;
+
+    var _MOVE_KEYS = ['w','W','a','A','s','S','d','D',
+                      'ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
+
+    function _keyLoop() {
+      var speed = 6 / (Graph.zoom() || 1);
+      var dx = 0, dy = 0;
+      if (_keys['w'] || _keys['W'] || _keys['ArrowUp'])    dy -= speed;
+      if (_keys['s'] || _keys['S'] || _keys['ArrowDown'])  dy += speed;
+      if (_keys['a'] || _keys['A'] || _keys['ArrowLeft'])  dx -= speed;
+      if (_keys['d'] || _keys['D'] || _keys['ArrowRight']) dx += speed;
+      if (dx !== 0 || dy !== 0) {
+        var c = Graph.centerAt();
+        Graph.centerAt(c.x + dx, c.y + dy);
+      }
+      var anyHeld = _MOVE_KEYS.some(function (k) { return _keys[k]; });
+      _rafId = anyHeld ? requestAnimationFrame(_keyLoop) : null;
+    }
+
+    window.addEventListener('keydown', function (e) {
+      if (document.activeElement === document.getElementById('search')) return;
+
+      if (e.key === '+' || e.key === '=' || e.key === 'NumpadAdd') {
+        e.preventDefault();
+        Graph.zoom(Graph.zoom() * 1.25, 150);
+        return;
+      }
+      if (e.key === '-' || e.key === '_' || e.key === 'NumpadSubtract') {
+        e.preventDefault();
+        Graph.zoom(Graph.zoom() / 1.25, 150);
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        _activeNode = null;
+        _nodeClickCount = 0;
+        _clearAllLegend();
+        _refresh();
+        document.getElementById('info').style.display = 'none';
+        return;
+      }
+
+      if (_MOVE_KEYS.indexOf(e.key) !== -1) {
+        e.preventDefault();
+        _keys[e.key] = true;
+        if (!_rafId) _rafId = requestAnimationFrame(_keyLoop);
+      }
+    });
+
+    window.addEventListener('keyup', function (e) {
+      delete _keys[e.key];
+      if (_rafId && !_MOVE_KEYS.some(function (k) { return _keys[k]; })) {
+        cancelAnimationFrame(_rafId);
+        _rafId = null;
+      }
+    });"""
+
+_KEYBOARD_3D = """\
+    /* -- Keyboard: Escape resets focus -------------------------------------- */
+    window.addEventListener('keydown', function (e) {
+      if (document.activeElement === document.getElementById('search')) return;
+      if (e.key === 'Escape') {
+        _activeNode = null;
+        _nodeClickCount = 0;
+        _clearAllLegend();
+        _refresh();
+        document.getElementById('info').style.display = 'none';
+      }
+    });"""
+
+# ── URL hash focus ────────────────────────────────────────────────────────────
+_HASH_FOCUS_2D = """\
+    var hashId = decodeURIComponent(window.location.hash.slice(1));
+    if (hashId) {
+      var _focused = false;
+      Graph.onEngineStop(function () {
+        if (_focused) return;
+        var node = GD.nodes.find(function (n) { return n.id === hashId; });
+        if (node && node.x !== undefined) {
+          _focused = true;
+          Graph.centerAt(node.x, node.y, 800);
+          Graph.zoom(5, 800);
+        }
+      });
+    }"""
+
+_HASH_FOCUS_3D = """\
+    var hashId = decodeURIComponent(window.location.hash.slice(1));
+    if (hashId) {
+      var _focused = false;
+      Graph.onEngineStop(function () {
+        if (_focused) return;
+        var node = GD.nodes.find(function (n) { return n.id === hashId; });
+        if (node && node.x !== undefined && node.y !== undefined) {
+          _focused = true;
+          var dist = 300;
+          var mag  = Math.hypot(node.x || 1, node.y || 1, node.z || 1);
+          var k    = 1 + dist / mag;
+          Graph.cameraPosition(
+            { x: node.x * k, y: node.y * k, z: node.z * k },
+            node,
+            1000
+          );
+        }
+      });
+    }"""
+
+
 # ── Standalone HTML template ──────────────────────────────────────────────────
-# Note: all user-supplied content is set via textContent (DOM API) in JS,
-# never via innerHTML, to prevent XSS.
+# Markers (substituted after .format()):
+#   __CDN_SCRIPTS__   — CDN <script> tag
+#   __CONTROLS_ROWS__ — legend controls rows
+#   __GRAPH_CTOR__    — ForceGraph or ForceGraph3D
+#   __NODE_RENDER__   — renderer-specific chain methods
+#   __REFRESH_CALL__  — body of _refresh()
+#   __SEARCH_REFRESH__— graph update calls in search handler
+#   __KEYBOARD__      — keyboard event listeners
+#   __HASH_FOCUS__    — URL hash → camera focus
+#
+# Note: all user-supplied content is set via textContent (DOM API), never innerHTML.
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -213,14 +446,7 @@ _HTML_TEMPLATE = """\
         <button id="btn-reset">⟳ Reset all</button>
 
         <div class="leg-section">Controls</div>
-        <div class="leg-row"><kbd>drag</kbd>&nbsp;orbit / rotate</div>
-        <div class="leg-row"><kbd>scroll</kbd>&nbsp;zoom</div>
-        <div class="leg-row"><kbd>click ×1</kbd>&nbsp;focus node</div>
-        <div class="leg-row"><kbd>click ×2</kbd>&nbsp;+ select legend type</div>
-        <div class="leg-row"><kbd>click ×3</kbd>&nbsp;clear node, keep legend</div>
-        <div class="leg-row"><kbd>click bg</kbd>&nbsp;clear node focus</div>
-        <div class="leg-row"><kbd>right-click</kbd>&nbsp;open Obsidian</div>
-        <div class="leg-row"><kbd>Esc</kbd>&nbsp;reset everything</div>
+__CONTROLS_ROWS__
 
         <div class="leg-section">Node — Code</div>
         <div class="leg-row leg-filter" data-color="#4363d8"><span class="swatch" style="background:#4363d8"></span>function</div>
@@ -259,7 +485,6 @@ _HTML_TEMPLATE = """\
         <div class="leg-row" style="color:rgba(255,255,255,0.45);font-size:10px">&#9654; particles = wiki-link</div>
         <div class="leg-row" style="color:rgba(255,200,80,0.6);font-size:10px">click node = mentions_symbol</div>
 
-
       </div>
     </div>
   </div>
@@ -278,20 +503,20 @@ _HTML_TEMPLATE = """\
     <div id="info-hint"></div>
   </div>
 
-  <script src="https://unpkg.com/3d-force-graph@1/dist/3d-force-graph.min.js"></script>
-  <script src="https://unpkg.com/three-spritetext"></script>
+__CDN_SCRIPTS__
   <script>
   (function () {{
+    var _FONT_COLOR = '{font_color}';  /* used by 2D canvas renderer */
     var GD = {graph_data_json};
     var _activeNode = null;    /* clicked node id (ego-graph focus) */
     var _focusSet = null;      /* computed visible set: null = show all */
     var _legendColors = {{}};  /* multi-select: {{ color: true }} */
     var _legendEls = {{}};     /* {{ color: domElement }} for .active management */
-    var _nodeClickCount = 0;   /* consecutive clicks on _activeNode: 1=focus 2=+legend 3=clear node */
+    var _nodeClickCount = 0;   /* consecutive clicks on _activeNode */
     var _origColors = {{}};
     GD.nodes.forEach(function (n) {{ _origColors[n.id] = n.color; }});
 
-    /* -- Adjacency map (raw string ids, built before force-graph resolves them) */
+    /* -- Adjacency map (raw string ids) ------------------------------------ */
     var _adj = {{}};
     GD.links.forEach(function (l) {{
       if (l._onDemand) return;
@@ -302,11 +527,11 @@ _HTML_TEMPLATE = """\
       _adj[t][s] = true;
     }});
 
-    /* -- Compute focus set: union of legend colors + node ego-graph --------- */
+    /* -- Compute focus set ------------------------------------------------- */
     function _computeFocusSet() {{
       var hasLegend = Object.keys(_legendColors).length > 0;
       var hasNode   = !!_activeNode;
-      if (!hasLegend && !hasNode) return null;  /* show everything */
+      if (!hasLegend && !hasNode) return null;
 
       var set = {{}};
       if (hasLegend) {{
@@ -323,15 +548,14 @@ _HTML_TEMPLATE = """\
       return set;
     }}
 
-    /* -- Apply computed focus to the graph ---------------------------------- */
+    /* -- Apply focus ------------------------------------------------------- */
     function _refresh() {{
       _focusSet = _computeFocusSet();
       GD.nodes.forEach(function (n) {{ n._dimmed = _focusSet ? !_focusSet[n.id] : false; }});
-      Graph.nodeVisibility(function (n) {{ return !n._dimmed; }});
-      Graph.linkVisibility(_linkVisible);
+__REFRESH_CALL__
     }}
 
-    /* -- Clear all legend selections ---------------------------------------- */
+    /* -- Clear legend selections ------------------------------------------- */
     function _clearAllLegend() {{
       Object.keys(_legendEls).forEach(function (c) {{
         _legendEls[c].classList.remove('active');
@@ -340,7 +564,7 @@ _HTML_TEMPLATE = """\
       _legendEls = {{}};
     }}
 
-    /* -- Toggle a legend color on/off --------------------------------------- */
+    /* -- Toggle legend color ----------------------------------------------- */
     function _toggleLegend(color, el) {{
       if (_legendColors[color]) {{
         delete _legendColors[color];
@@ -354,7 +578,6 @@ _HTML_TEMPLATE = """\
       _refresh();
     }}
 
-    /* Legend click delegation */
     document.getElementById('legend-body').addEventListener('click', function (e) {{
       var row = e.target.closest('.leg-filter');
       if (!row) return;
@@ -362,15 +585,11 @@ _HTML_TEMPLATE = """\
       if (color) _toggleLegend(color, row);
     }});
 
-    /* -- Link visibility callback ----------------------------------------- */
+    /* -- Link visibility --------------------------------------------------- */
     function _linkVisible(link) {{
       var s = typeof link.source === 'object' ? link.source.id : link.source;
       var t = typeof link.target === 'object' ? link.target.id : link.target;
-
-      /* Focus mode: hide edges where either endpoint is dimmed */
       if (_focusSet && (!_focusSet[s] || !_focusSet[t])) return false;
-
-      /* On-demand edges: only when their node is the active node */
       if (link._onDemand) {{
         if (!_activeNode) return false;
         return s === _activeNode || t === _activeNode;
@@ -378,7 +597,7 @@ _HTML_TEMPLATE = """\
       return true;
     }}
 
-    /* -- Info panel (DOM-safe: textContent only) ---------------------------- */
+    /* -- Info panel -------------------------------------------------------- */
     function _setText(id, val) {{
       var el = document.getElementById(id);
       if (el) el.textContent = val || '';
@@ -398,7 +617,6 @@ _HTML_TEMPLATE = """\
         (node.community ? '  cluster: ' + node.community : '')
       );
 
-      /* -- Tag nodes: show list of tagged nodes instead of file/sig -- */
       if (node.kind === 'tag') {{
         var nodeMap = {{}};
         GD.nodes.forEach(function (n) {{ nodeMap[n.id] = n; }});
@@ -437,38 +655,18 @@ _HTML_TEMPLATE = """\
       document.getElementById('info').style.display = 'block';
     }}
 
-    /* -- Node label sprite (3D) --------------------------------------------- */
-    function _makeSprite(node) {{
-      var sp = new SpriteText(node.label || '');
-      sp.material.depthWrite = false;
-      sp.color = '{font_color}';
-      sp.textHeight = 4;
-      sp.padding = 1;
-      return sp;
-    }}
-
-    /* -- Build graph -------------------------------------------------------- */
-    var Graph = ForceGraph3D()(document.getElementById('graph'))
+    /* -- Build graph ------------------------------------------------------- */
+    var Graph = __GRAPH_CTOR__()(document.getElementById('graph'))
       .backgroundColor('{bg_color}')
       .width(window.innerWidth)
       .height(window.innerHeight)
       .graphData(GD)
       .nodeId('id')
       .nodeVal('val')
-      .nodeColor(function (n) {{ return _origColors[n.id] || '#888888'; }})
-      .nodeThreeObject(_makeSprite)
-      .nodeThreeObjectExtend(true)
-      .linkColor('color')
-      .linkWidth('width')
-      .linkVisibility(_linkVisible)
-      .linkDirectionalParticles('particles')
-      .linkDirectionalParticleSpeed(0.005)
-      .linkDirectionalParticleWidth(2.5)
-      .linkDirectionalParticleColor('color')
+__NODE_RENDER__
       .nodeLabel(function (node) {{ return node.tooltip || node.label || node.id; }})
       .onNodeClick(function (node) {{
         if (_activeNode !== node.id) {{
-          /* Different node: click 1 — ego focus */
           _activeNode = node.id;
           _nodeClickCount = 1;
           _refresh();
@@ -476,7 +674,6 @@ _HTML_TEMPLATE = """\
         }} else {{
           _nodeClickCount++;
           if (_nodeClickCount === 2) {{
-            /* Click 2: also select this node's legend type */
             var color = _origColors[node.id];
             if (color) {{
               var el = document.querySelector('.leg-filter[data-color="' + color + '"]');
@@ -484,7 +681,6 @@ _HTML_TEMPLATE = """\
             }}
             _showInfo(node);
           }} else {{
-            /* Click 3+: deselect node, keep legend */
             _activeNode = null;
             _nodeClickCount = 0;
             _refresh();
@@ -497,19 +693,18 @@ _HTML_TEMPLATE = """\
         else if (node.obsidian_uri) window.open(node.obsidian_uri, '_blank');
       }})
       .onBackgroundClick(function () {{
-        /* Background click: clear node focus only, keep legend selections */
         _activeNode = null;
         _nodeClickCount = 0;
         _refresh();
         document.getElementById('info').style.display = 'none';
       }});
 
-    /* -- Responsive --------------------------------------------------------- */
+    /* -- Responsive -------------------------------------------------------- */
     window.addEventListener('resize', function () {{
       Graph.width(window.innerWidth).height(window.innerHeight);
     }});
 
-    /* -- Search: highlights matching nodes, clears all focus/legend -------- */
+    /* -- Search ------------------------------------------------------------ */
     document.getElementById('search').addEventListener('input', function (e) {{
       var q = e.target.value.toLowerCase().trim();
       _activeNode = null;
@@ -527,13 +722,12 @@ _HTML_TEMPLATE = """\
           n._dimmed = !match;
         }});
       }}
-      Graph.nodeVisibility(function (n) {{ return !n._dimmed; }});
-      Graph.linkVisibility(_linkVisible);
+__SEARCH_REFRESH__
     }});
 
-    /* -- Reset button ------------------------------------------------------- */
+    /* -- Reset button ------------------------------------------------------ */
     document.getElementById('btn-reset').addEventListener('click', function (e) {{
-      e.stopPropagation();  /* don't trigger legend collapse */
+      e.stopPropagation();
       _activeNode = null;
       _clearAllLegend();
       _refresh();
@@ -541,7 +735,7 @@ _HTML_TEMPLATE = """\
       document.getElementById('search').value = '';
     }});
 
-    /* -- Legend toggle ------------------------------------------------------ */
+    /* -- Legend collapse --------------------------------------------------- */
     document.getElementById('legend-header').addEventListener('click', function () {{
       var body = document.getElementById('legend-body');
       var arrow = document.getElementById('legend-arrow');
@@ -549,38 +743,9 @@ _HTML_TEMPLATE = """\
       arrow.textContent = collapsed ? '▸' : '▾';
     }});
 
-    /* -- Keyboard: Escape resets focus -------------------------------------- */
-    window.addEventListener('keydown', function (e) {{
-      if (document.activeElement === document.getElementById('search')) return;
-      if (e.key === 'Escape') {{
-        _activeNode = null;
-        _nodeClickCount = 0;
-        _clearAllLegend();
-        _refresh();
-        document.getElementById('info').style.display = 'none';
-      }}
-    }});
+__KEYBOARD__
 
-    /* -- URL hash focus: graph.html#NODE-ID --------------------------------- */
-    var hashId = decodeURIComponent(window.location.hash.slice(1));
-    if (hashId) {{
-      var _focused = false;
-      Graph.onEngineStop(function () {{
-        if (_focused) return;
-        var node = GD.nodes.find(function (n) {{ return n.id === hashId; }});
-        if (node && node.x !== undefined && node.y !== undefined) {{
-          _focused = true;
-          var dist = 300;
-          var mag  = Math.hypot(node.x || 1, node.y || 1, node.z || 1);
-          var k    = 1 + dist / mag;
-          Graph.cameraPosition(
-            {{ x: node.x * k, y: node.y * k, z: node.z * k }},
-            node,
-            1000
-          );
-        }}
-      }});
-    }}
+__HASH_FOCUS__
   }})();
   </script>
 </body>
@@ -629,8 +794,9 @@ def generate_html(
     vault_name: str | None = None,
     on_demand_relations: set[str] | None = None,
     min_degree: int = 0,
+    use_3d: bool = False,
 ) -> None:
-    """Generate an interactive HTML graph visualization using force-graph.
+    """Generate an interactive HTML graph visualization.
 
     Args:
         graph: Knowledge graph to visualize.
@@ -643,6 +809,8 @@ def generate_html(
         on_demand_relations: Edge relation types shown only on node click.
             Defaults to {"mentions_symbol"}.
         min_degree: Only render nodes with structural degree >= N (0 = all).
+        use_3d: If True, render with 3d-force-graph (Three.js); otherwise 2D
+            force-graph (D3 Canvas). Default: False (2D).
     """
     if on_demand_relations is None:
         on_demand_relations = {"mentions_symbol"}
@@ -692,9 +860,6 @@ def generate_html(
                 portal_href = ""
             obsidian_uri = ""
         elif data.get("namespace") == "code" or node_id.startswith("code::"):
-            # Code node (real or stub). namespace="code" is set by graph.py for new
-            # ingests; node_id prefix is the fallback for graphs ingested before fix.
-            # Slate-blue for unknown/external code kinds (logging, pathlib, typing etc.)
             label_display = label
             color = _KIND_COLORS.get(kind, "#5a7fa8")
             portal_href = ""
@@ -788,19 +953,13 @@ def generate_html(
 
     title = vault_name or output_path.parent.name or "PrismRag Graph"
 
-    # ── Community legend: group doc nodes by rendered color ──────────────────
-    # Multiple community_ids may map to the same color (12-color palette wraps
-    # over 95 communities). Count by actual color so numbers reflect real sizes.
-    # For each color we pick the hub node (highest degree doc node) as the cluster name.
-    # Only "note" and "knowledge" kinds qualify — tag nodes are excluded to prevent
-    # high-degree tags (e.g. tag:Ollama) from stealing the label.
+    # ── Community legend ─────────────────────────────────────────────────────
     _DOC_KINDS = {"note", "knowledge"}
     color_counts: dict[str, int] = {}
-    color_hub: dict[str, tuple[int, str]] = {}  # color → (max_degree, hub_label)
+    color_hub: dict[str, tuple[int, str]] = {}
     for node_entry in nodes:
         kind_ = node_entry.get("kind", "")
         nid_ = node_entry.get("id", "")
-        # Only count genuine doc nodes; skip code, tags, portals
         if kind_ not in _DOC_KINDS:
             continue
         if kind_ in _KIND_COLORS or kind_ == "context_ref" or nid_.startswith("code::"):
@@ -808,16 +967,14 @@ def generate_html(
         c = node_entry.get("color", "")
         if c and c != "#888888":
             color_counts[c] = color_counts.get(c, 0) + 1
-            deg = node_entry.get("degree", 1)  # raw degree for hub selection
+            deg = node_entry.get("degree", 1)
             label = node_entry.get("label") or node_entry.get("id", "")
-            # Strip namespace prefix for display (e.g. "nimbus::Foo" → "Foo")
             if "::" in label:
                 label = label.split("::")[-1]
             prev_deg, _ = color_hub.get(c, (-1, ""))
             if deg > prev_deg:
                 color_hub[c] = (deg, label)
 
-    # Top 8 colors by doc node count
     top_colors = sorted(color_counts, key=lambda c: -color_counts[c])[:8]
     community_legend_rows = []
     for color in top_colors:
@@ -831,7 +988,9 @@ def generate_html(
         )
     community_legend_html = "\n        ".join(community_legend_rows) if community_legend_rows else ""
 
+    # ── Assemble HTML ────────────────────────────────────────────────────────
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
     html = _HTML_TEMPLATE.format(
         title=title,
         bg_color=bg_color,
@@ -840,12 +999,30 @@ def generate_html(
         link_count=len(links),
         od_count=len(od_links),
         community_legend_html=community_legend_html,
-        graph_data_json=json.dumps(graph_data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/"),
+        graph_data_json=json.dumps(
+            graph_data, ensure_ascii=False, separators=(",", ":")
+        ).replace("</", "<\\/"),
     )
+
+    # ── Substitute mode-specific blocks ──────────────────────────────────────
+    refresh_call  = _REFRESH_CALL_3D  if use_3d else _REFRESH_CALL_2D
+    html = (
+        html
+        .replace("__CDN_SCRIPTS__",   _CDN_3D          if use_3d else _CDN_2D)
+        .replace("__CONTROLS_ROWS__", _CONTROLS_3D     if use_3d else _CONTROLS_2D)
+        .replace("__GRAPH_CTOR__",    _GRAPH_CTOR_3D   if use_3d else _GRAPH_CTOR_2D)
+        .replace("__NODE_RENDER__",   _NODE_RENDER_3D  if use_3d else _NODE_RENDER_2D)
+        .replace("__REFRESH_CALL__",  refresh_call)
+        .replace("__SEARCH_REFRESH__", refresh_call)
+        .replace("__KEYBOARD__",      _KEYBOARD_3D     if use_3d else _KEYBOARD_2D)
+        .replace("__HASH_FOCUS__",    _HASH_FOCUS_3D   if use_3d else _HASH_FOCUS_2D)
+    )
+
     output_path.write_text(html, encoding="utf-8")
 
+    mode_name = "3d-force-graph" if use_3d else "force-graph (2D)"
     logger.info(
-        "[visualize] saved 3d-force-graph HTML to %s "
+        "[visualize] saved %s HTML to %s "
         "(%d nodes, %d structural + %d on-demand links)",
-        output_path, len(nodes), len(links), len(od_links),
+        mode_name, output_path, len(nodes), len(links), len(od_links),
     )
