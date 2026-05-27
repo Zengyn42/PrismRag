@@ -416,7 +416,7 @@ _HTML_TEMPLATE = """\
         }});
         tagged.sort();
         var listText = tagged.length
-          ? 'Tagged nodes (' + tagged.length + '):\n• ' + tagged.join('\n• ')
+          ? 'Tagged nodes (' + tagged.length + '):\\n\\u2022 ' + tagged.join('\\n\\u2022 ')
           : 'No tagged nodes';
         _setText('info-file', listText);
         _setText('info-sig', '');
