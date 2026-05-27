@@ -339,7 +339,7 @@ def _parse_function(
 
     fn_node = TreeNode(
         id=fn_id,
-        kind="function",
+        kind="test" if fn_name.startswith("test_") else "function",
         label=fn_name,
         content=content,
         namespace="code",
