@@ -337,9 +337,18 @@ def _parse_function(
     docstring = _extract_docstring(body)
     content = src_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
 
+    is_test = fn_name.startswith("test_")
+    is_method = bool(enclosing_class_id)
+    if is_test:
+        node_kind = "test"
+    elif is_method:
+        node_kind = "method"
+    else:
+        node_kind = "function"
+
     fn_node = TreeNode(
         id=fn_id,
-        kind="test" if fn_name.startswith("test_") else "function",
+        kind=node_kind,
         label=fn_name,
         content=content,
         namespace="code",
