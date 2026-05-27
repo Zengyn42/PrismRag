@@ -1,0 +1,9 @@
+# Ingest output — large files, not committed
+**/*.lance/
+**/embed_cache.jsonl
+**/file_hashes.json
+**/bm25_index/
+**/graph.json
+**/GRAPH_REPORT.md
+# Keep graph.html out too (demo copy lives in demo/)
+**/graph.html
