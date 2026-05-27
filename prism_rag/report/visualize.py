@@ -923,7 +923,7 @@ def generate_html(
         link_count=len(links),
         od_count=len(od_links),
         community_legend_html=community_legend_html,
-        graph_data_json=json.dumps(graph_data, ensure_ascii=False, separators=(",", ":")),
+        graph_data_json=json.dumps(graph_data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/"),
     )
     output_path.write_text(html, encoding="utf-8")
 
