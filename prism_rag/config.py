@@ -92,12 +92,48 @@ _DEFAULT_PROFILES: dict[str, ClassifierProfile] = {
 
 
 class GraphSource(BaseModel):
-    """Configuration for a single graph source (vault + data directory pair)."""
+    """Configuration for a single graph source (vault + data directory pair).
+
+    The ``sources`` field controls which source extractors run during ingest:
+      - "docs"   — Obsidian vault markdown (default, excludes knowledge/ files)
+      - "code"   — Tree-sitter Python AST
+      - "memory" — Agent memory files (requires atomize)
+      - "knot"   — KNOT files (knowledge/*.md with knowledge_id frontmatter)
+
+    KNOT (Knowledge Ontology Token), file prefix KNOW- kept for data compat.
+    """
 
     namespace: str
     vault_path: Path
     data_dir: Path
     writable: bool = False
+    sources: list[str] = Field(
+        default=["docs"],
+        description="Source extractors to run: 'docs', 'code', 'memory', 'knot'. "
+                    "Default ['docs'] preserves backward compatibility.",
+    )
+    atomize_docs: bool = Field(
+        default=False,
+        description="Whether to run atomize on docs source (optional, not required).",
+    )
+    memory_paths: list[Path] = Field(
+        default_factory=list,
+        description="File or directory paths for memory source (markdown). "
+                    "Only used when 'memory' is in sources.",
+    )
+
+    @field_validator("sources", mode="before")
+    @classmethod
+    def _parse_sources(cls, v):
+        if isinstance(v, str):
+            v = [s.strip() for s in v.split(",") if s.strip()]
+        from prism_rag.sources.base import VALID_SOURCES
+        for s in v:
+            if s not in VALID_SOURCES:
+                raise ValueError(
+                    f"Invalid source {s!r}. Must be one of: {', '.join(sorted(VALID_SOURCES))}"
+                )
+        return v
 
     @property
     def graph_path(self) -> Path:

@@ -61,6 +61,11 @@ def ingest(
     vault: Path = typer.Option(None, "--vault", "-v", help="Vault path"),
     output: Path = typer.Option(None, "--output", "-o", help="Output dir"),
     namespace: str = typer.Option("", "--namespace", "-n", help="Namespace for this vault's graph"),
+    sources: str = typer.Option(
+        "",
+        "--sources", "-s",
+        help="Comma-separated source extractors: docs,code,memory,knot (default: docs,knot)",
+    ),
     skip_cluster: bool = typer.Option(False, "--skip-cluster"),
     skip_report: bool = typer.Option(False, "--skip-report"),
     skip_embed: bool = typer.Option(False, "--skip-embed", help="Skip Pass 3 embedding + similarity edges"),
@@ -72,49 +77,108 @@ def ingest(
     """Build the knowledge graph from the vault.
 
     Pipeline: Pass 1 (AST) → Pass 3 (Embedding) → Pass 4 (Leiden) → Pass 5 (Persist + Report)
+
+    Use --sources to select which extractors to run (default: docs,knot for
+    backward compatibility with existing vault ingest behavior).
     """
     skip_embed = skip_embed or no_embedding
+
+    # Parse --sources into a list; default = ["docs", "knot"] (backward compat:
+    # old ingest loaded both regular docs AND knowledge/ files)
+    source_list = [s.strip() for s in sources.split(",") if s.strip()] if sources else ["docs", "knot"]
+
+    # Validate source names
+    from prism_rag.sources.base import VALID_SOURCES
+    for s in source_list:
+        if s not in VALID_SOURCES:
+            typer.secho(
+                f"Invalid source {s!r}. Must be one of: {', '.join(sorted(VALID_SOURCES))}",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(1)
 
     if namespace and output is not None:
         output = output / namespace
 
     settings = _resolve_settings(vault, output, namespace=namespace)
 
-    typer.secho(f"📂 Vault:  {settings.vault_path}", fg=typer.colors.CYAN)
-    typer.secho(f"📁 Output: {settings.data_dir}", fg=typer.colors.CYAN)
+    typer.secho(f"📂 Vault:    {settings.vault_path}", fg=typer.colors.CYAN)
+    typer.secho(f"📁 Output:   {settings.data_dir}", fg=typer.colors.CYAN)
+    typer.secho(f"🔌 Sources:  {', '.join(source_list)}", fg=typer.colors.CYAN)
     typer.echo("")
 
     if not settings.vault_path.exists():
         typer.secho(f"❌ Vault path does not exist: {settings.vault_path}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
 
-    # ── Pass 1a: Load vault ──
-    typer.secho("🔍 Pass 1a: Discovering markdown files...", fg=typer.colors.BLUE)
-    docs, live_sha_set = load_vault(settings.vault_path)
-    typer.echo(f"   Found {len(docs)} markdown files")
-
-    if not docs:
-        typer.secho("⚠️  No markdown files found.", fg=typer.colors.YELLOW)
-        raise typer.Exit(0)
-
-    # ── Pass 1b: AST extraction ──
-    typer.secho("\n🧩 Pass 1b: Extracting wikilinks, tags, frontmatter...", fg=typer.colors.BLUE)
     graph = KnowledgeGraph()
-    extract_ast(graph, docs)
-    typer.echo(f"   Nodes: {graph.node_count} · Edges: {graph.edge_count}")
+    live_sha_set: set[tuple[str, str]] = set()
 
-    # ── Pass 2: Media extraction ──
-    from prism_rag.ingest.media_extractor import add_media_nodes
-    from prism_rag.ingest.vault_loader import VaultMedia, discover_vault_files
+    # ── Source extraction via pluggable extractors ──
+    from prism_rag.store.networkx_backend import NetworkXBackend
+    backend = NetworkXBackend(graph)
 
-    typer.secho("\n📄 Pass 2: Extracting PDF content...", fg=typer.colors.BLUE)
-    media_paths = [
-        p for p in discover_vault_files(settings.vault_path)
-        if p.suffix.lower() == ".pdf"
-    ]
-    media = [VaultMedia.from_path(p, settings.vault_path) for p in media_paths]
-    n_media = add_media_nodes(graph, media)
-    typer.echo(f"   PDF nodes: {n_media}")
+    if "docs" in source_list:
+        from prism_rag.sources.docs_source import DocsSourceExtractor
+        typer.secho("🔍 Pass 1a: Extracting docs (excluding knowledge/ files)...", fg=typer.colors.BLUE)
+        docs_ext = DocsSourceExtractor()
+        result = docs_ext.parse(settings.vault_path)
+        backend.write_result(result)
+        typer.echo(f"   Doc nodes: {len(result.nodes)} · Edges: {len(result.edges)}")
+        # Build live_sha_set for embed cache GC
+        for nr in result.nodes:
+            if nr.content_hash:
+                live_sha_set.add((nr.id, nr.content_hash))
+
+    if "knot" in source_list:
+        from prism_rag.sources.knot_loader import KnotLoader
+        typer.secho("\n🔍 Pass 1b: Loading KNOT files (knowledge/*.md)...", fg=typer.colors.BLUE)
+        knot = KnotLoader()
+        knot_result = knot.parse(settings.vault_path)
+        if knot_result.nodes:
+            backend.write_result(knot_result)
+            typer.echo(f"   KNOT nodes: {len(knot_result.nodes)}")
+            for nr in knot_result.nodes:
+                if nr.content_hash:
+                    live_sha_set.add((nr.id, nr.content_hash))
+        else:
+            typer.secho("   No KNOT files found.", fg=typer.colors.YELLOW)
+
+    if "code" in source_list:
+        from prism_rag.sources.code_source import CodeSourceExtractor
+        typer.secho("\n🔍 Parsing code source (Tree-sitter AST)...", fg=typer.colors.BLUE)
+        code_ext = CodeSourceExtractor()
+        code_result = code_ext.parse(settings.vault_path)
+        backend.write_result(code_result)
+        typer.echo(f"   Code nodes: {len(code_result.nodes)} · Edges: {len(code_result.edges)}")
+
+    if "memory" in source_list:
+        from prism_rag.sources.memory_source import MemorySourceExtractor, AtomizeUnavailableError
+        typer.secho("\n🔍 Processing memory source...", fg=typer.colors.BLUE)
+        memory_ext = MemorySourceExtractor(memory_paths=settings.resolved_graphs[0].memory_paths if settings.graphs else [])
+        try:
+            memory_result = memory_ext.parse(settings.vault_path)
+            backend.write_result(memory_result)
+            typer.echo(f"   Memory nodes: {len(memory_result.nodes)}")
+        except AtomizeUnavailableError as e:
+            typer.secho(f"   ❌ {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+
+    typer.echo(f"\n   Total — Nodes: {graph.node_count} · Edges: {graph.edge_count}")
+
+    # ── Pass 2: Media extraction (only when docs source is active) ──
+    if "docs" in source_list:
+        from prism_rag.ingest.media_extractor import add_media_nodes
+        from prism_rag.ingest.vault_loader import VaultMedia, discover_vault_files
+
+        typer.secho("\n📄 Pass 2: Extracting PDF content...", fg=typer.colors.BLUE)
+        media_paths = [
+            p for p in discover_vault_files(settings.vault_path)
+            if p.suffix.lower() == ".pdf"
+        ]
+        media = [VaultMedia.from_path(p, settings.vault_path) for p in media_paths]
+        n_media = add_media_nodes(graph, media)
+        typer.echo(f"   PDF nodes: {n_media}")
 
     # ── Pass 3: Embedding + similarity edges ──
     _embed_ready = (
@@ -409,9 +473,23 @@ def ingest_code(
 
     Pipeline: Tree-sitter AST → ParseResult → KnowledgeGraph → Leiden → Embed → graph.json
 
+    DEPRECATED: Use 'prism-rag ingest --sources code' instead.
+    This command is kept as a thin alias for backward compatibility.
+
     Example:
         prism-rag ingest-code --repo /home/kingy/Foundation/ZenithLoom
     """
+    import warnings
+    warnings.warn(
+        "ingest-code is deprecated. Use 'prism-rag ingest --sources code' instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    typer.secho(
+        "⚠️  ingest-code is deprecated. Use 'prism-rag ingest --sources code' instead.",
+        fg=typer.colors.YELLOW, err=True,
+    )
+
     from prism_rag.ingest.code_parser import CodeParser
     from prism_rag.ingest.embedder import compute_embeddings, persist_embeddings
     from prism_rag.store.networkx_backend import NetworkXBackend
@@ -777,6 +855,9 @@ def ingest_project(
 ) -> None:
     """Ingest a project's code AND docs into one unified knowledge graph + HTML visualization.
 
+    DEPRECATED: Use 'prism-rag ingest --sources docs,code,knot' instead.
+    This command is kept for backward compatibility.
+
     Pipeline:
       Pass 1a — Tree-sitter AST (Python files)
       Pass 1b — Markdown vault loader + wikilink/tag extraction
@@ -789,7 +870,17 @@ def ingest_project(
     Example:
         prism-rag ingest-project --repo /home/kingy/Projects/Pulsify --namespace pulsify
     """
-    from prism_rag.ingest.ast_extractor import extract_ast
+    import warnings
+    warnings.warn(
+        "ingest-project is deprecated. Use 'prism-rag ingest --sources docs,code,knot' instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    typer.secho(
+        "⚠️  ingest-project is deprecated. Use 'prism-rag ingest --sources docs,code,knot' instead.",
+        fg=typer.colors.YELLOW, err=True,
+    )
+
     from prism_rag.ingest.code_parser import CodeParser
     from prism_rag.ingest.embedder import compute_embeddings, persist_embeddings
     from prism_rag.ingest.similarity_linker import link_similar_nodes
@@ -827,6 +918,7 @@ def ingest_project(
     docs, live_sha_set = load_vault(repo)
     if docs:
         typer.echo(f"   Found {len(docs)} markdown files")
+        from prism_rag.ingest.ast_extractor import extract_ast
         before_nodes = graph.node_count
         extract_ast(graph, docs)
         typer.echo(f"   Doc nodes added: {graph.node_count - before_nodes} · Total nodes: {graph.node_count}")
