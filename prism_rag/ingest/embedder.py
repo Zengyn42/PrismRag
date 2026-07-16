@@ -1,6 +1,6 @@
 """Pass 3a: Compute embeddings for all text nodes.
 
-Supports two backends selected via PRISM_EMBED_BACKEND env var:
+Supports three backends selected via PRISM_EMBED_BACKEND env var:
 
   ollama  (default) — local Ollama, no API key needed
                       Recommended models (set via PRISM_OLLAMA_MODEL):
@@ -15,16 +15,19 @@ Supports two backends selected via PRISM_EMBED_BACKEND env var:
                         gemini-embedding-001  dim up to 3072  text, #1 MTEB multilingual (default)
                         gemini-embedding-2    multimodal (text/image/video/audio/PDF)
 
-Both backends expose the same interface:
+  openai            — OpenAI-compatible /v1/embeddings endpoint
+                      Works with vLLM, LM Studio, OpenRouter, etc.
+
+All backends expose the same interface:
   compute_embeddings(graph, settings) → dict[node_id, list[float]]
 
-OllamaEmbedder also provides embed_query(text) for query-time use in hybrid search.
+Use get_embedder(settings) as the single factory for constructing embedders.
 
 Usage:
-    from prism_rag.ingest.embedder import compute_embeddings, OllamaEmbedder
-    vectors = compute_embeddings(graph, settings)
-    embedder = OllamaEmbedder()
+    from prism_rag.ingest.embedder import get_embedder, compute_embeddings
+    embedder = get_embedder(settings)
     qvec = embedder.embed_query("context explosion")
+    vectors = compute_embeddings(graph, settings)
 """
 
 from __future__ import annotations
@@ -49,7 +52,6 @@ _RATE_LIMIT_DELAY = 0.5
 
 # ── Ollama Embedder ───────────────────────────────────────────────────────────
 
-_OLLAMA_DEFAULT_MODEL = "bge-m3"
 _OLLAMA_DEFAULT_HOST = "http://localhost:11434"
 
 
@@ -75,22 +77,21 @@ def detect_model_device(model: str, host: str) -> str:
 
 
 class OllamaEmbedder:
-    """Embed text via a local Ollama model (default: bge-m3, dim=1024).
+    """Embed text via a local Ollama model.
 
-    Works for both index-time (batch) and query-time (single) embedding,
-    so the same model is used in both directions — a requirement for
-    meaningful similarity comparisons.
+    The ``model`` parameter is **required** — there is no silent default.
+    Use ``get_embedder(settings)`` factory to construct from config.
 
     Usage::
 
-        embedder = OllamaEmbedder()
+        embedder = OllamaEmbedder(model="bge-m3")
         vec = embedder.embed_query("what is context explosion?")
         vecs = embedder.embed_batch(["text a", "text b"])
     """
 
     def __init__(
         self,
-        model: str = _OLLAMA_DEFAULT_MODEL,
+        model: str,  # Required — no default to prevent silent mismatch bugs
         base_url: str = _OLLAMA_DEFAULT_HOST,
         timeout: int = 120,
     ) -> None:
@@ -126,6 +127,189 @@ class OllamaEmbedder:
                 f"Ollama returned {len(embeddings)} embeddings for {len(inputs)} inputs"
             )
         return [list(e) for e in embeddings]
+
+
+# ── OpenAI-Compatible Embedder ───────────────────────────────────────────────
+
+
+class OpenAICompatEmbedder:
+    """Embed text via an OpenAI-compatible /v1/embeddings endpoint.
+
+    Works with vLLM, LM Studio, OpenRouter, and any server that implements
+    the OpenAI embedding API contract.
+
+    Usage::
+
+        embedder = OpenAICompatEmbedder(
+            model="text-embedding-3-small",
+            base_url="http://localhost:1234",
+            api_key="sk-...",
+        )
+        vec = embedder.embed_query("hello")
+    """
+
+    def __init__(
+        self,
+        model: str,  # Required — no default
+        base_url: str = "http://localhost:1234",
+        api_key: str = "",
+        timeout: int = 120,
+    ) -> None:
+        self.model = model
+        self._url = f"{base_url.rstrip('/')}/v1/embeddings"
+        self._api_key = api_key
+        self._timeout = timeout
+
+    def embed_query(self, text: str) -> list[float]:
+        """Embed a single query string."""
+        results = self._call([text])
+        return results[0]
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed a list of texts. Returns one vector per input."""
+        if not texts:
+            return []
+        return self._call(texts)
+
+    def _call(self, inputs: list[str]) -> list[list[float]]:
+        import urllib.request
+        import json as _json
+
+        payload = _json.dumps({"input": inputs, "model": self.model}).encode()
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        req = urllib.request.Request(
+            self._url,
+            data=payload,
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            body = _json.loads(resp.read())
+
+        # OpenAI response: {"data": [{"embedding": [...], "index": 0}, ...]}
+        data = body.get("data", [])
+        # Sort by index to guarantee order
+        data.sort(key=lambda d: d.get("index", 0))
+        return [item["embedding"] for item in data]
+
+
+# ── Embedder Factory ─────────────────────────────────────────────────────────
+
+
+def get_embedder(
+    settings: PrismRagSettings,
+    *,
+    namespace: str = "",
+) -> OllamaEmbedder | OpenAICompatEmbedder:
+    """Single factory for constructing the correct embedder from config.
+
+    All call sites must use this factory — never construct OllamaEmbedder()
+    or OpenAICompatEmbedder() directly (except in tests).
+
+    If ``namespace`` is provided and a matching GraphSource has per-namespace
+    embed overrides (embed_backend, embed_model, embed_dim), those take
+    priority over global settings.
+    """
+    # Resolve per-namespace overrides
+    backend = settings.embed_backend
+    model = settings.get_embed_model_name()
+    host = settings.ollama_host
+
+    if namespace and settings.graphs:
+        for gs in settings.graphs:
+            if gs.namespace == namespace:
+                if gs.embed_backend:
+                    backend = gs.embed_backend
+                if gs.embed_model:
+                    model = gs.embed_model
+                break
+
+    if backend == "openai":
+        return OpenAICompatEmbedder(
+            model=model if model != settings.ollama_model else settings.openai_embed_model,
+            base_url=settings.openai_base_url,
+            api_key=settings.openai_api_key,
+        )
+    elif backend == "gemini":
+        # Gemini embedder uses the google SDK, not our simple HTTP class.
+        # For query-time use, fall back to a thin wrapper or raise.
+        # For now, return OllamaEmbedder as a fallback if gemini is set but
+        # query-time needs a simple embedder. The compute path uses SDK directly.
+        raise ValueError(
+            "Gemini backend does not support get_embedder() for query-time use. "
+            "Use compute_embeddings() for index-time embedding."
+        )
+    else:
+        # ollama (default)
+        return OllamaEmbedder(model=model, base_url=host)
+
+
+# ── Embed Meta (index/query consistency guard) ──────────────────────────────
+
+_EMBED_META_FILENAME = "embed_meta.json"
+
+
+def write_embed_meta(
+    data_dir: Path,
+    backend: str,
+    model: str,
+    dim: int,
+) -> None:
+    """Write embed_meta.json to record which model was used at index time."""
+    meta_path = data_dir / _EMBED_META_FILENAME
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta = {"backend": backend, "model": model, "dim": dim}
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    logger.info(f"[embedder] wrote embed_meta.json: {meta}")
+
+
+def check_embed_consistency(
+    settings: PrismRagSettings,
+    *,
+    data_dir: Path | None = None,
+) -> None:
+    """Check if current embed config matches the index-time embed_meta.json.
+
+    If embed_meta.json is missing (old data), silently skips.
+    If there is a mismatch, logs a prominent WARNING (does not raise).
+    """
+    target_dir = data_dir or settings.data_dir
+    meta_path = target_dir / _EMBED_META_FILENAME
+    if not meta_path.exists():
+        return  # Old data dir without meta — skip silently
+
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return  # Corrupt file — skip
+
+    index_backend = meta.get("backend", "")
+    index_model = meta.get("model", "")
+    index_dim = meta.get("dim", 0)
+
+    current_backend = settings.embed_backend
+    current_model = settings.get_embed_model_name()
+    current_dim = settings.embedding_dim
+
+    mismatches: list[str] = []
+    if index_backend and index_backend != current_backend:
+        mismatches.append(f"backend: index={index_backend} vs query={current_backend}")
+    if index_model and index_model != current_model:
+        mismatches.append(f"model: index={index_model} vs query={current_model}")
+    if index_dim and index_dim != current_dim:
+        mismatches.append(f"dim: index={index_dim} vs query={current_dim}")
+
+    if mismatches:
+        logger.warning(
+            "[embedder] EMBEDDING MISMATCH — index model differs from query model, "
+            "results will be garbage! %s. "
+            "Re-run 'prism-rag ingest' with the current model to fix.",
+            "; ".join(mismatches),
+        )
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 
 def _truncate(text: str, max_chars: int = _MAX_INPUT_CHARS) -> str:
@@ -174,9 +358,8 @@ def compute_embeddings(
 ) -> dict[str, list[float]]:
     """Compute embeddings for all embeddable nodes using the configured backend.
 
-    Backend is selected by settings.embed_backend ('ollama' or 'gemini').
-    Ollama uses settings.ollama_host / settings.ollama_model (local, no key needed).
-    Gemini uses settings.gemini_api_key / settings.embed_dimensionality.
+    Backend is selected by settings.embed_backend ('ollama', 'gemini', or 'openai').
+    After computing, writes embed_meta.json to data_dir for consistency checking.
 
     Args:
         cache_path: Optional path to embed_cache.jsonl for checkpoint/resume support.
@@ -187,8 +370,10 @@ def compute_embeddings(
         dict mapping node_id → embedding vector (list of floats).
     """
     if settings.embed_backend == "ollama":
-        return _compute_embeddings_ollama(graph, settings, cache_path=cache_path)
-    else:
+        result = _compute_embeddings_ollama(graph, settings, cache_path=cache_path)
+    elif settings.embed_backend == "openai":
+        result = _compute_embeddings_openai(graph, settings, cache_path=cache_path)
+    elif settings.embed_backend == "gemini":
         if not settings.gemini_api_key:
             raise ValueError(
                 "PRISM_GEMINI_API_KEY is required when embed_backend='gemini'. "
@@ -200,7 +385,20 @@ def compute_embeddings(
                 "[embedder] privacy_tier=free: Gemini free tier may use your data "
                 "for model training. Set PRISM_PRIVACY_TIER=paid for production use."
             )
-        return _compute_embeddings_gemini(graph, settings, settings.embed_dimensionality)
+        result = _compute_embeddings_gemini(graph, settings, settings.embed_dimensionality)
+    else:
+        raise ValueError(f"Unknown embed_backend: {settings.embed_backend!r}")
+
+    # Write embed_meta.json for index/query consistency checking
+    if result:
+        write_embed_meta(
+            settings.data_dir,
+            backend=settings.embed_backend,
+            model=settings.get_embed_model_name(),
+            dim=settings.embedding_dim,
+        )
+
+    return result
 
 
 _OLLAMA_BATCH_SIZE = 16   # texts per HTTP request; tune to GPU VRAM
@@ -279,7 +477,7 @@ def gc_embed_cache(
 
 def _compute_embeddings_ollama(
     graph: KnowledgeGraph,
-    settings: PrismRagSettings | None = None,
+    settings: PrismRagSettings,
     cache_path: Path | None = None,
 ) -> dict[str, list[float]]:
     """Compute embeddings using local Ollama (batched)."""
@@ -306,8 +504,8 @@ def _compute_embeddings_ollama(
         logger.info("[embedder/ollama] all nodes hit cache, skipping embed call")
         return vectors
 
-    model = settings.ollama_model if settings else _OLLAMA_DEFAULT_MODEL
-    host = settings.ollama_host if settings else _OLLAMA_DEFAULT_HOST
+    model = settings.ollama_model
+    host = settings.ollama_host
 
     device = detect_model_device(model, host)
     if device == "cpu":
@@ -362,6 +560,81 @@ def _compute_embeddings_ollama(
             logger.info(f"[embedder/ollama] progress: {done}/{total}")
 
     logger.info(f"[embedder/ollama] done: {len(vectors)}/{total + len(cache)}")
+    return vectors
+
+
+def _compute_embeddings_openai(
+    graph: KnowledgeGraph,
+    settings: PrismRagSettings,
+    cache_path: Path | None = None,
+) -> dict[str, list[float]]:
+    """Compute embeddings using an OpenAI-compatible /v1/embeddings endpoint."""
+    nodes_to_embed = _get_embeddable_nodes(graph)
+    if not nodes_to_embed:
+        logger.info("[embedder/openai] no embeddable nodes found")
+        return {}
+
+    cache: dict[str, tuple[str, list[float]]] = {}
+    if cache_path is not None:
+        cache = _load_embed_cache(cache_path)
+
+    vectors: dict[str, list[float]] = {}
+    pending: list[tuple[str, str]] = []
+    for node_id, content in nodes_to_embed:
+        node_data = graph.g.nodes[node_id]
+        sha = node_data.get("content_hash", "")
+        if node_id in cache and cache[node_id][0] == sha:
+            vectors[node_id] = cache[node_id][1]
+        else:
+            pending.append((node_id, content))
+
+    if not pending:
+        logger.info("[embedder/openai] all nodes hit cache, skipping embed call")
+        return vectors
+
+    embedder = OpenAICompatEmbedder(
+        model=settings.openai_embed_model,
+        base_url=settings.openai_base_url,
+        api_key=settings.openai_api_key,
+    )
+    total = len(pending)
+    batch_size = _OLLAMA_BATCH_SIZE  # reuse same batch size
+
+    logger.info(
+        f"[embedder/openai] computing {total} embeddings "
+        f"(model={embedder.model}, batch={batch_size}, cache_hits={len(vectors)})"
+    )
+
+    for batch_start in range(0, total, batch_size):
+        batch = pending[batch_start: batch_start + batch_size]
+        node_ids = [nid for nid, _ in batch]
+        texts = [_truncate(content) for _, content in batch]
+        try:
+            vecs = embedder.embed_batch(texts)
+            for nid, vec in zip(node_ids, vecs):
+                vectors[nid] = vec
+                if cache_path is not None:
+                    sha = graph.g.nodes[nid].get("content_hash", "")
+                    _append_cache_entry(cache_path, nid, sha, vec)
+        except Exception as exc:
+            logger.error(
+                f"[embedder/openai] batch {batch_start}–{batch_start + len(batch) - 1} failed: {exc}"
+            )
+            for nid, text in zip(node_ids, texts):
+                try:
+                    vec = embedder.embed_query(text)
+                    vectors[nid] = vec
+                    if cache_path is not None:
+                        sha = graph.g.nodes[nid].get("content_hash", "")
+                        _append_cache_entry(cache_path, nid, sha, vec)
+                except Exception as exc2:
+                    logger.error(f"[embedder/openai] node {nid} failed: {exc2}")
+
+        done = min(batch_start + batch_size, total)
+        if done % 160 == 0 or done == total:
+            logger.info(f"[embedder/openai] progress: {done}/{total}")
+
+    logger.info(f"[embedder/openai] done: {len(vectors)}/{total + len(cache)}")
     return vectors
 
 

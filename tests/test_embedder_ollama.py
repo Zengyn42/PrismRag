@@ -82,7 +82,7 @@ def test_embed_query_uses_configured_host():
         return _fake_response([_vec()])
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        emb = OllamaEmbedder(base_url="http://myhost:9999")
+        emb = OllamaEmbedder(model="bge-m3", base_url="http://myhost:9999")
         emb.embed_query("x")
 
     assert "myhost:9999" in captured["url"]
@@ -94,21 +94,21 @@ def test_embed_query_uses_configured_host():
 def test_embed_batch_returns_one_per_input():
     vecs = [_vec(), _vec(), _vec()]
     with patch("urllib.request.urlopen", return_value=_fake_response(vecs)):
-        emb = OllamaEmbedder()
+        emb = OllamaEmbedder(model="bge-m3")
         result = emb.embed_batch(["a", "b", "c"])
     assert len(result) == 3
     assert result[0] == _vec()
 
 
 def test_embed_batch_empty_input():
-    emb = OllamaEmbedder()
+    emb = OllamaEmbedder(model="bge-m3")
     result = emb.embed_batch([])
     assert result == []
 
 
 def test_embed_batch_count_mismatch_raises():
     with patch("urllib.request.urlopen", return_value=_fake_response([_vec()])):
-        emb = OllamaEmbedder()
+        emb = OllamaEmbedder(model="bge-m3")
         with pytest.raises(ValueError, match="2 inputs"):
             emb.embed_batch(["a", "b"])
 

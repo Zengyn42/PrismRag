@@ -69,7 +69,7 @@ def hybrid_search(
         graph: The KnowledgeGraph to search.
         bm25_index: Pre-built BM25Index (optional; skipped if None or not ready).
         embed_fn: Callable that maps a query string → embedding vector.
-                  Typically ``OllamaEmbedder().embed_query``.
+                  Typically ``get_embedder(settings).embed_query``.
         embedding_store: EmbeddingStore with ``nearest()`` method.
         top_k: Number of node IDs to return.
         namespace: If non-empty, filter results to nodes with this namespace.

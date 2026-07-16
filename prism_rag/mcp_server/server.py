@@ -119,14 +119,14 @@ def _ensure_federated() -> FederatedGraph:
         except Exception as exc:
             logger.warning(f"[mcp] embedding store unavailable: {exc}")
 
-        # Create query-time embedder (graceful fallback if Ollama/Gemini unavailable)
+        # Create query-time embedder (graceful fallback if unavailable)
         try:
-            from prism_rag.ingest.embedder import OllamaEmbedder
-            _embedder = OllamaEmbedder(
-                model=settings.ollama_model,
-                base_url=settings.ollama_host,
-            )
-            logger.info(f"[mcp] embedder ready: ollama/{settings.ollama_model}")
+            from prism_rag.ingest.embedder import get_embedder, check_embed_consistency
+            _embedder = get_embedder(settings)
+            logger.info(f"[mcp] embedder ready: {settings.embed_backend}/{_embedder.model}")
+            # Check index/query model consistency for each loaded graph
+            for src in settings.resolved_graphs:
+                check_embed_consistency(settings, data_dir=src.data_dir)
         except Exception as exc:
             logger.warning(f"[mcp] no embedder for hybrid search: {exc}")
 

@@ -45,7 +45,7 @@ class DedupConfig(BaseModel):
 
 
 PrivacyTier = Literal["paid", "free"]
-EmbedBackend = Literal["ollama", "gemini"]
+EmbedBackend = Literal["ollama", "gemini", "openai"]
 
 # Embedding dimensions for known Ollama models (key = model name without :tag or /path prefix).
 # Used by PrismRagSettings.embedding_dim when ollama_embed_dim is 0 (auto-detect).
@@ -120,6 +120,19 @@ class GraphSource(BaseModel):
         default_factory=list,
         description="File or directory paths for memory source (markdown). "
                     "Only used when 'memory' is in sources.",
+    )
+    embed_backend: str = Field(
+        default="",
+        description="Per-namespace embedding backend override ('' = use global setting).",
+    )
+    embed_model: str = Field(
+        default="",
+        description="Per-namespace embedding model override ('' = use global setting).",
+    )
+    embed_dim: int = Field(
+        default=0,
+        ge=0,
+        description="Per-namespace embedding dimension override (0 = use global setting).",
     )
 
     @field_validator("sources", mode="before")
@@ -201,6 +214,27 @@ class PrismRagSettings(BaseSettings):
         le=4096,
         description="Gemini embedding output dimension via MRL truncation (max 3072 for gemini-embedding-001). "
                     "Ignored for Ollama — use ollama_embed_dim or auto-detection instead.",
+    )
+
+    # OpenAI-compatible settings (used when embed_backend='openai')
+    openai_base_url: str = Field(
+        default="http://localhost:1234",
+        description="OpenAI-compatible /v1/embeddings endpoint base URL "
+                    "(works with vLLM, LM Studio, OpenRouter, etc.).",
+    )
+    openai_api_key: str = Field(
+        default="",
+        description="API key for the OpenAI-compatible endpoint (may be empty for local servers).",
+    )
+    openai_embed_model: str = Field(
+        default="text-embedding-3-small",
+        description="Model name sent in the /v1/embeddings request body.",
+    )
+    openai_embed_dim: int = Field(
+        default=1536,
+        ge=1,
+        le=8192,
+        description="Expected embedding dimension for the OpenAI-compatible backend.",
     )
 
     # ── Similarity edges (Pass 3, not used in MVP) ───────────────────
@@ -323,10 +357,13 @@ class PrismRagSettings(BaseSettings):
     def embedding_dim(self) -> int:
         """Expected embedding dimension for the configured backend.
 
+        openai → openai_embed_dim (default 1536)
         gemini → embed_dimensionality (default 768, max 3072)
         ollama → ollama_embed_dim if non-zero, else OLLAMA_MODEL_DIMS lookup by model name,
                  else 1024 fallback for unknown models.
         """
+        if self.embed_backend == "openai":
+            return self.openai_embed_dim
         if self.embed_backend == "gemini":
             return self.embed_dimensionality
         if self.ollama_embed_dim > 0:
@@ -334,6 +371,14 @@ class PrismRagSettings(BaseSettings):
         # Strip :tag and path prefix for lookup (e.g. "nomic-embed-text:v1.5" → "nomic-embed-text")
         base = self.ollama_model.split(":")[0].split("/")[-1]
         return OLLAMA_MODEL_DIMS.get(base, 1024)
+
+    def get_embed_model_name(self) -> str:
+        """Return the effective embedding model name for the configured backend."""
+        if self.embed_backend == "openai":
+            return self.openai_embed_model
+        if self.embed_backend == "gemini":
+            return self.gemini_embed_model
+        return self.ollama_model
 
     @property
     def resolved_graphs(self) -> list[GraphSource]:

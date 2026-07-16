@@ -14,7 +14,19 @@ from prism_rag.ingest.embedder import (
     _compute_embeddings_ollama,
     gc_embed_cache,
 )
+from prism_rag.config import PrismRagSettings
 from prism_rag.store.graph import KnowledgeGraph, Node
+
+
+def _test_settings(**kwargs):
+    """Build a PrismRagSettings with safe defaults for cache tests."""
+    defaults = dict(
+        embed_backend="ollama",
+        ollama_model="bge-m3",
+        ollama_host="http://localhost:11434",
+    )
+    defaults.update(kwargs)
+    return PrismRagSettings(**defaults)
 
 
 def test_load_embed_cache_empty(tmp_path):
@@ -117,7 +129,7 @@ def test_compute_embeddings_ollama_skips_cache_hits(tmp_path):
     with patch("prism_rag.ingest.embedder.OllamaEmbedder") as mock_cls:
         mock_embedder = MagicMock()
         mock_cls.return_value = mock_embedder
-        result = _compute_embeddings_ollama(kg, settings=None, cache_path=cache_file)
+        result = _compute_embeddings_ollama(kg, settings=_test_settings(), cache_path=cache_file)
 
     mock_embedder.embed_batch.assert_not_called()
     assert result["n1"] == cached_vec
@@ -134,7 +146,7 @@ def test_compute_embeddings_ollama_reembeds_on_sha_mismatch(tmp_path):
         mock_embedder = MagicMock()
         mock_embedder.embed_batch.return_value = [new_vec]
         mock_cls.return_value = mock_embedder
-        result = _compute_embeddings_ollama(kg, settings=None, cache_path=cache_file)
+        result = _compute_embeddings_ollama(kg, settings=_test_settings(), cache_path=cache_file)
 
     assert result["n1"] == new_vec
     lines = [json.loads(l) for l in cache_file.read_text().strip().split("\n") if l]
