@@ -322,9 +322,9 @@ prism-rag atomize promote <id>   # 批准 → 写入图
 
 ---
 
-## v6.0 展望：联邦元图
+## v7.0 展望：联邦元图
 
-> 详见 [v6.0-design.md](v6.0-design.md) 和 [v6.0-implementation-plan.md](v6.0-implementation-plan.md)
+> 详见 [v7.0-design.md](v7.0-design.md) 和 [v7.0-implementation-plan.md](v7.0-implementation-plan.md)
 
 核心目标：跨多个 namespace（不同 vault / repo）的统一全局视图。
 

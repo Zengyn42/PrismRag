@@ -3,7 +3,7 @@
 > 无垠智穹 · 图优先 RAG 系统 · Zengyn42
 > 从 Markdown vault 和代码库构建知识图谱，通过 MCP Server 对外提供基于图遍历的语义检索。
 
-**状态**：✅ v5.7 完成，准备进入 v6.0（联邦元图）
+**状态**：✅ v5.7 完成，v6.0 进行中（可插拔原子化与知识基准）
 
 ---
 
@@ -37,7 +37,8 @@
 | v5.5 | ✅ | Atomize 语义去重（复用已有节点，减少冗余）|
 | v5.6 | ✅ | 图可视化升级：Obsidian URI 深链、portal 跨 namespace 节点 |
 | **v5.7** | ✅ | **force-graph WebGL 渲染器**（替换 pyvis）、统一 code+docs 图、ego-graph 焦点、多选 legend、聚类语义命名 |
-| v6.0 | 🔜 | 联邦元图（多 namespace 全局视图）|
+| v6.0 | 🔧 | 可插拔原子化（统一 Knot 类型、Splitter 接口）+ GraphRAG 吸收（status 字段、gleanings、社区报告、global_ask）+ B1 基准 |
+| v7.0 | 🔜 | 联邦元图（多 namespace 全局视图）|
 
 ---
 

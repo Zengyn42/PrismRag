@@ -322,9 +322,9 @@ Each target (vault or repo) has its own isolated `.prismrag/` directory.
 
 ---
 
-## v6.0 Outlook: Federated Meta-Graph
+## v7.0 Outlook: Federated Meta-Graph
 
-> See [v6.0-design.en.md](v6.0-design.en.md) and [v6.0-implementation-plan.en.md](v6.0-implementation-plan.en.md)
+> See [v7.0-design.en.md](v7.0-design.en.md) and [v7.0-implementation-plan.en.md](v7.0-implementation-plan.en.md)
 
 Core goal: unified global view across multiple namespaces (different vaults / repos).
 

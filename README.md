@@ -3,7 +3,7 @@
 > Zengyn42 · Graph-First RAG System
 > Builds a knowledge graph from Markdown vaults and code repositories, providing graph-traversal-based semantic retrieval via an MCP Server.
 
-**Status**: ✅ v5.7 complete, preparing for v6.0 (Federated Meta-Graph)
+**Status**: ✅ v5.7 complete, v6.0 in progress (Pluggable Atomization & Knowledge Benchmark)
 
 ---
 
@@ -37,7 +37,8 @@ How PrismRag differs from traditional RAG:
 | v5.5 | ✅ | Atomize semantic deduplication (reuse existing nodes, reduce redundancy) |
 | v5.6 | ✅ | Visualization upgrade: Obsidian URI deep-links, portal cross-namespace nodes |
 | **v5.7** | ✅ | **force-graph WebGL renderer** (replaces pyvis), unified code+docs graph, ego-graph focus, multi-select legend, semantic cluster naming |
-| v6.0 | 🔜 | Federated meta-graph (global view across multiple namespaces) |
+| v6.0 | 🔧 | Pluggable atomization (unified Knot type, Splitter interface) + GraphRAG absorption (status field, gleanings, community reports, global_ask) + B1 benchmark |
+| v7.0 | 🔜 | Federated meta-graph (global view across multiple namespaces) |
 
 ---
 
@@ -198,8 +199,8 @@ PrismRag/
 │   └── mcp_server/             # MCP Server (18 tools)
 ├── docs/                       # architecture docs + design plans
 │   ├── ARCHITECTURE.md
-│   ├── v6.0-implementation-plan.md
-│   └── v6.0-design.md
+│   ├── v7.0-implementation-plan.md
+│   └── v7.0-design.md
 ├── pyproject.toml
 └── README.md                   # Chinese version
 └── README.en.md                # This file (English version)

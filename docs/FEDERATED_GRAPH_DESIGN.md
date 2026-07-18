@@ -1,7 +1,15 @@
 # PrismRag Federated Graph Design
 
 > Date: 2026-04-13
-> Status: Approved (architecture decision, not yet implemented)
+> Status: Superseded in part — see `v7.0-design.md` §9 (ADR, 2026-06-10)
+>
+> Key updates from the 2026-06-10 debate verdict:
+> - **Merged mode is CUT from v7.0** (deferred to v7.1+ as offline batch);
+>   the `multi_graph_mode: "merged"` config below will not be implemented.
+> - Bridge caching now uses sorted-embedding-matrix SHA256 keys + manifest
+>   provenance (not "never persisted" as stated below).
+> - Cross-graph token budget: global priority queue with 30% source-graph
+>   floor (replaces ad-hoc allocation).
 
 ## Summary
 

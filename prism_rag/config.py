@@ -314,6 +314,8 @@ class PrismRagSettings(BaseSettings):
     @classmethod
     def _parse_graphs_json(cls, v):
         if isinstance(v, str):
+            if not v.strip():
+                return None
             parsed = json.loads(v)
             return [GraphSource(**item) for item in parsed]
         return v

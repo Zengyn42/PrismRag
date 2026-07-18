@@ -87,7 +87,7 @@ Jei test runner must use unique session names + `ctrl.switch_session()` to force
 
 - Obsidian URI 支持
 - Portal nodes
-- Federation meta-graph（已在同版本 refactor 移除，defer 到 v6.0）
+- Federation meta-graph（已在同版本 refactor 移除，defer 到 v7.0）
 - 当前测试：**511 tests**
 - Tag: HEAD（无独立 v5.6 tag）
 
@@ -100,7 +100,16 @@ Jei test runner must use unique session names + `ctrl.switch_session()` to force
 - 修复了原来 `ingest-code` 无 viz、`ingest` 无代码 的两个缺口
 - 首次 ingest：Pulsify 1,684 nodes（1,643 code + 41 docs），95 communities
 
-## v6.0 — 设计规划（未实现）
+## v6.0 — 可插拔原子化与知识基准（进行中，2026-07-18 立项）
+
+- KNOT（Knowledge Ontology Token，知识元）统一类型：所有拆分方法输出 list[Knot]
+- Splitter 可插拔接口 + 5 个注册方法（passthrough/sentence/paragraph/fixed_window/llm）
+- LlmSplitter：版本化原子化 prompt（v1），后端可注入（Ollama/Claude CLI）
+- GraphRAG 吸收计划：Knot status 字段、gleanings 追捕、社区报告 + global_ask、增量选择性重算
+- B1 拆分质量 benchmark（Claim2Atom/FActScore 风格）
+- 详见 docs/v6.0-atomization-plan.md 与 docs/graphrag-comparison.md
+
+## v7.0（原 v6.0）— 联邦元图，设计规划（未实现）
 
 ### By-demand Graph Loading
 - **Graph Registry 文件** (`graph_registry.json`) — `ingest-code` 跑完自动注册，Server 启动时合并加载
