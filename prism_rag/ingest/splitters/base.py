@@ -43,6 +43,16 @@ class Knot:
             knot understandable without the source document.
         method: Name of the splitter/method that produced this knot
             (filled by the pipeline, useful in benchmarks).
+        status: Lifecycle state (GraphRAG claims-schema inspired):
+            "confirmed"  — default; believed current and true
+            "suspected"  — possibly stale (e.g. drift-checker saw the
+                           linked code change); needs re-verification
+            "superseded" — replaced by a newer knot; kept for history
+        payload: Optional structured projection of the knowledge for
+            machine consumption (e.g. procedure → {"commands": [...]},
+            fact → {"triple": [s, p, o]}). The text body remains the
+            canonical source of truth; payload is derived and always
+            regenerable from text. None when no projection exists.
         metadata: Arbitrary key-value pairs for method-specific info
             (e.g. confidence score, window index, token count).
 
@@ -57,7 +67,18 @@ class Knot:
     source_section_id: str | None = None
     context_note: str | None = None
     method: str = ""
+    status: str = "confirmed"
+    payload: dict | None = None
     metadata: dict = field(default_factory=dict)
+
+    VALID_STATUSES = ("confirmed", "suspected", "superseded")
+
+    def __post_init__(self):
+        if self.status not in self.VALID_STATUSES:
+            raise ValueError(
+                f"Invalid Knot status {self.status!r}; "
+                f"expected one of {self.VALID_STATUSES}"
+            )
 
     def to_claim_dict(self, *, section_id: str | None = None) -> dict:
         """Adapter → the claim dict shape consumed by atomize_propose_impl.

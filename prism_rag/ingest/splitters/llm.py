@@ -188,7 +188,10 @@ class LlmSplitter(Splitter):
         )
         raw = self._llm_fn(prompt)
         items = _extract_json_array(raw)
+        return self._items_to_knots(items)
 
+    def _items_to_knots(self, items: list) -> list[Knot]:
+        """Normalize raw LLM item dicts into Knot instances (shared with subclasses)."""
         knots: list[Knot] = []
         for item in items:
             if not isinstance(item, dict):

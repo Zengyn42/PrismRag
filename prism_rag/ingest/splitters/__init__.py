@@ -9,6 +9,7 @@ submodules (e.g. passthrough, molecular_facts, …).
 
 from prism_rag.ingest.splitters.base import AtomicClaim, Knot, PassthroughSplitter, Splitter
 from prism_rag.ingest.splitters.fixed_window import FixedWindowSplitter
+from prism_rag.ingest.splitters.gleanings import GleaningsSplitter
 from prism_rag.ingest.splitters.llm import LlmSplitter
 from prism_rag.ingest.splitters.paragraph import ParagraphSplitter
 from prism_rag.ingest.splitters.registry import (
@@ -23,6 +24,7 @@ __all__ = [
     "AtomicClaim",
     "Knot",
     "FixedWindowSplitter",
+    "GleaningsSplitter",
     "LlmSplitter",
     "ParagraphSplitter",
     "PassthroughSplitter",

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from prism_rag.ingest.splitters.base import PassthroughSplitter, Splitter
 from prism_rag.ingest.splitters.fixed_window import FixedWindowSplitter
+from prism_rag.ingest.splitters.gleanings import GleaningsSplitter
 from prism_rag.ingest.splitters.llm import LlmSplitter
 from prism_rag.ingest.splitters.paragraph import ParagraphSplitter
 from prism_rag.ingest.splitters.sentence import SentenceSplitter
@@ -23,6 +24,7 @@ from prism_rag.ingest.splitters.sentence import SentenceSplitter
 SPLITTER_REGISTRY: dict[str, type[Splitter]] = {
     "fixed_window": FixedWindowSplitter,
     "llm": LlmSplitter,
+    "llm_gleanings": GleaningsSplitter,
     "paragraph": ParagraphSplitter,
     "passthrough": PassthroughSplitter,
     "sentence": SentenceSplitter,

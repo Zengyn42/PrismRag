@@ -8,6 +8,7 @@ Graph query tools (7):
   explore_community  Drill into a specific community's members
   list_namespaces    List all loaded knowledge graph namespaces
   check_drift        Detect stale vault→code mentions_symbol references
+  flag_drift         Flag KNOT nodes as "suspected" when their docs have stale symbol refs
 
 Vault CRUD tools (11) — ported from ZenithLoom's Obsidian MCP:
   read_note          Read a note's content + frontmatter + cas_hash
@@ -878,6 +879,89 @@ def check_drift(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+# -- Tool 8b: flag_drift --------------------------------------------------------
+
+
+@mcp.tool()
+def flag_drift(
+    vault_namespace: str = "nimbus",
+    code_namespace: str = "code",
+) -> str:
+    """Find stale mentions_symbol edges (symbol no longer in code graph), then flag all KNOT nodes linked from those docs as status="suspected".
+
+    Combines check_drift detection with automatic KNOT lifecycle update.
+    Returns JSON with flagged_count, stale_doc_count, and per-doc details (doc, stale_symbols, flagged_knots).
+    Idempotent: already-suspected nodes are not re-flagged.
+    Saves the vault graph after flagging.
+    """
+    from prism_rag.ingest.drift import flag_knots_suspected
+
+    fg = _ensure_federated()
+    vault_g = fg.get_graph(vault_namespace)
+    code_g = fg.get_graph(code_namespace)
+
+    if vault_g is None:
+        return json.dumps(
+            {"error": f"Vault namespace not loaded: {vault_namespace!r}"},
+            ensure_ascii=False,
+        )
+    if code_g is None:
+        return json.dumps(
+            {"error": f"Code namespace not loaded: {code_namespace!r}"},
+            ensure_ascii=False,
+        )
+
+    # Step 1: collect stale edges grouped by source doc
+    stale_by_doc: dict[str, list[str]] = {}
+    for src, tgt, d in vault_g.g.edges(data=True):
+        if d.get("relation") != "mentions_symbol":
+            continue
+        if tgt not in code_g.g:
+            src_data = vault_g.g.nodes[src]
+            src_file = src_data.get("source_file", src)
+            symbol_name = tgt.split("::")[-1] if "::" in tgt else tgt
+            stale_by_doc.setdefault(src_file, []).append(symbol_name)
+
+    if not stale_by_doc:
+        return json.dumps(
+            {"flagged_count": 0, "stale_doc_count": 0, "details": []},
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    # Step 2: flag KNOT nodes linked to each stale doc
+    details: list[dict] = []
+    total_flagged = 0
+    for doc_file, symbols in stale_by_doc.items():
+        reason = f"stale mentions_symbol: {', '.join(symbols)}"
+        flagged_ids = flag_knots_suspected(vault_g, doc_file, reason=reason)
+        total_flagged += len(flagged_ids)
+        details.append({
+            "doc": doc_file,
+            "stale_symbols": symbols,
+            "flagged_knots": flagged_ids,
+        })
+
+    # Step 3: persist
+    settings = PrismRagSettings()
+    vault_src = next(
+        (s for s in settings.resolved_graphs if s.namespace == vault_namespace),
+        None,
+    )
+    if vault_src is not None:
+        vault_g.save(vault_src.graph_path)
+
+    return json.dumps(
+        {
+            "flagged_count": total_flagged,
+            "stale_doc_count": len(stale_by_doc),
+            "details": details,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
 # -- Tool 9: pending_edges (merged list_pending_edges + get_pending_edge_context) --
 
 
@@ -1460,6 +1544,94 @@ To trace from a vault doc to a code symbol:
 - Use `ontology_type="decision"` to filter for architectural decisions
 - `budget=8000` for detailed deep dives; `budget=2000` for quick lookups
 """
+
+
+# -- Tool: generate_community_reports ----------------------------------------
+
+
+@mcp.tool()
+def generate_community_reports(vault_namespace: str = "nimbus", min_members: int = 3) -> str:
+    """Generate LLM-written community reports for all qualifying Leiden communities.
+    Reports are cached to community_reports.json in the namespace data directory.
+    Returns JSON with report_count and a summary of each report (title, rating, community_id).
+    Does NOT modify the graph — read-only analysis. Requires Ollama running locally.
+
+    min_members: skip communities with fewer than this many nodes (default 3).
+    """
+    from prism_rag.report.community_report import (
+        generate_all_community_reports as _gen_all,
+        save_community_reports,
+    )
+
+    fg = _ensure_federated()
+    graph = fg.get_graph(vault_namespace)
+    if graph is None:
+        return json.dumps(
+            {"error": f"Namespace {vault_namespace!r} not found",
+             "available": list(fg.namespaces)},
+            ensure_ascii=False,
+        )
+
+    reports = _gen_all(graph, min_members=min_members)
+
+    # Cache to data_dir
+    settings = PrismRagSettings()
+    src = next((s for s in settings.resolved_graphs if s.namespace == vault_namespace), None)
+    if src is not None:
+        cache_path = src.data_dir / "community_reports.json"
+        save_community_reports(reports, cache_path)
+
+    result = {
+        "report_count": len(reports),
+        "namespace": vault_namespace,
+        "reports": [
+            {
+                "community_id": r.community_id,
+                "title": r.title,
+                "rating": r.rating,
+                "summary": r.summary[:200],
+            }
+            for r in reports
+        ],
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+# -- Tool: global_ask --------------------------------------------------------
+
+
+@mcp.tool()
+def global_ask(question: str, vault_namespace: str = "nimbus") -> str:
+    """Answer a question using map-reduce over all community reports in the knowledge graph.
+    Returns a synthesized natural-language answer that integrates knowledge from all relevant communities.
+    Uses pre-cached community reports if available; generates them on-the-fly otherwise.
+    Does NOT modify the graph — read-only. Requires Ollama running locally.
+
+    Prefer search_knowledge() for targeted node lookup. Use global_ask for broad, cross-topic questions
+    that may span multiple communities (e.g. "What are the main architectural patterns in this codebase?").
+    """
+    from prism_rag.report.community_report import load_community_reports
+    from prism_rag.retrieve.global_ask import global_ask as _global_ask
+
+    fg = _ensure_federated()
+    graph = fg.get_graph(vault_namespace)
+    if graph is None:
+        return json.dumps(
+            {"error": f"Namespace {vault_namespace!r} not found",
+             "available": list(fg.namespaces)},
+            ensure_ascii=False,
+        )
+
+    # Try loading cached reports
+    settings = PrismRagSettings()
+    src = next((s for s in settings.resolved_graphs if s.namespace == vault_namespace), None)
+    cached_reports = None
+    if src is not None:
+        cache_path = src.data_dir / "community_reports.json"
+        cached_reports = load_community_reports(cache_path) or None
+
+    answer = _global_ask(question, graph, community_reports=cached_reports)
+    return json.dumps({"question": question, "answer": answer}, ensure_ascii=False, indent=2)
 
 
 # -- Register ported Obsidian MCP tools (vault_tools.py) ---------------------
