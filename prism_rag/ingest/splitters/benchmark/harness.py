@@ -90,22 +90,41 @@ def format_report(report: BenchmarkReport) -> str:
     lines.append(f"- **Timestamp**: {report.timestamp}")
     lines.append(f"- **Cases**: {report.dataset_size}")
     lines.append(f"")
-    lines.append(
-        "| Splitter | Atomicity | Self-Contained | Faithfulness | Coverage | Overall |"
-    )
-    lines.append(
-        "|----------|-----------|----------------|--------------|----------|---------|"
-    )
+    has_gold = any(s.gold_alignment > 0 for s in report.scores)
 
-    for s in sorted(report.scores, key=lambda x: x.overall, reverse=True):
+    if has_gold:
         lines.append(
-            f"| {s.splitter_name:<14s} "
-            f"| {s.atomicity:9.4f} "
-            f"| {s.self_containedness:14.4f} "
-            f"| {s.faithfulness:12.4f} "
-            f"| {s.coverage:8.4f} "
-            f"| {s.overall:7.4f} |"
+            "| Splitter | Atomicity | Self-Cont. | Faithful | Coverage | Gold-F1 | Overall |"
         )
+        lines.append(
+            "|----------|-----------|------------|----------|----------|---------|---------|"
+        )
+        for s in sorted(report.scores, key=lambda x: x.overall, reverse=True):
+            lines.append(
+                f"| {s.splitter_name:<14s} "
+                f"| {s.atomicity:9.4f} "
+                f"| {s.self_containedness:10.4f} "
+                f"| {s.faithfulness:8.4f} "
+                f"| {s.coverage:8.4f} "
+                f"| {s.gold_alignment:7.4f} "
+                f"| {s.overall:7.4f} |"
+            )
+    else:
+        lines.append(
+            "| Splitter | Atomicity | Self-Contained | Faithfulness | Coverage | Overall |"
+        )
+        lines.append(
+            "|----------|-----------|----------------|--------------|----------|---------|"
+        )
+        for s in sorted(report.scores, key=lambda x: x.overall, reverse=True):
+            lines.append(
+                f"| {s.splitter_name:<14s} "
+                f"| {s.atomicity:9.4f} "
+                f"| {s.self_containedness:14.4f} "
+                f"| {s.faithfulness:12.4f} "
+                f"| {s.coverage:8.4f} "
+                f"| {s.overall:7.4f} |"
+            )
 
     lines.append("")
     return "\n".join(lines)

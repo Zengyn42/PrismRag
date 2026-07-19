@@ -73,21 +73,31 @@ Return [] if the text contains nothing worth keeping.
 
 
 def _default_ollama_generate(prompt: str, *, model: str, host: str, timeout: int) -> str:
-    """Minimal stdlib Ollama /api/generate call (non-streaming)."""
+    """Minimal stdlib Ollama /api/chat call (non-streaming).
+
+    Uses ``think: false`` to disable thinking mode in reasoning models
+    (gemma4, qwen3.5, etc.) so all tokens go to the actual response.
+    """
     import urllib.request
 
     payload = json.dumps(
-        {"model": model, "prompt": prompt, "stream": False}
+        {"model": model,
+         "messages": [
+             {"role": "user", "content": prompt},
+         ],
+         "think": False,
+         "stream": False,
+         "options": {"num_predict": 4096, "num_ctx": 8192}}
     ).encode("utf-8")
     req = urllib.request.Request(
-        f"{host.rstrip('/')}/api/generate",
+        f"{host.rstrip('/')}/api/chat",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    return data.get("response", "")
+    return data.get("message", {}).get("content", "")
 
 
 def _extract_json_array(text: str) -> list:
@@ -125,6 +135,16 @@ def _extract_json_array(text: str) -> list:
                     except json.JSONDecodeError:
                         break
         start = text.find("[", start + 1)
+    # Last resort: try to repair truncated JSON by closing open brackets
+    start = text.find("[")
+    if start != -1:
+        fragment = text[start:]
+        # Attempt to close truncated array: append missing `}]` or `]`
+        for suffix in ('}]', ']', '"}]', '""}}]', '"}]'):
+            try:
+                return json.loads(fragment + suffix)
+            except json.JSONDecodeError:
+                continue
     raise ValueError(f"No parseable JSON array in LLM output (head: {text[:200]!r})")
 
 
@@ -187,6 +207,8 @@ class LlmSplitter(Splitter):
             doc_context_block=doc_context_block, section_text=section_text
         )
         raw = self._llm_fn(prompt)
+        # Strip model thinking tags (e.g. qwen3 <think>...</think>)
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         items = _extract_json_array(raw)
         return self._items_to_knots(items)
 

@@ -18,7 +18,14 @@ from prism_rag.ingest.splitters.benchmark.harness import (
     format_report,
     run_benchmark,
 )
-from prism_rag.ingest.splitters.benchmark.scoring import SplitterScore, score_splitter
+from prism_rag.ingest.splitters.benchmark.propositionizer import (
+    load_propositionizer_dataset,
+)
+from prism_rag.ingest.splitters.benchmark.scoring import (
+    SplitterScore,
+    score_gold_alignment,
+    score_splitter,
+)
 
 __all__ = [
     "BenchmarkCase",
@@ -26,6 +33,8 @@ __all__ = [
     "SplitterScore",
     "format_report",
     "load_benchmark_dataset",
+    "load_propositionizer_dataset",
     "run_benchmark",
+    "score_gold_alignment",
     "score_splitter",
 ]
