@@ -203,11 +203,40 @@ The right conclusion comes from running downstream eval on a **larger corpus** (
 
 ---
 
+## Multi-Granularity Results (2026-07-19)
+
+### Entity-based L1 grouping (50 texts, 149 QA pairs)
+
+| Strategy | Recall | MRR | IoU | Boundary |
+|----------|--------|-----|-----|----------|
+| flat_l0 (baseline) | 0.940 | 0.444 | 0.162 | 0.521 |
+| flat_l1_window (3-knot group) | 0.966 | 0.924 | 0.305 | 0.521 |
+| **flat_l1_entity** | **0.973** | **0.934** | 0.277 | **0.564** |
+| parent_l0 (L0→window L1) | 0.966 | 0.929 | 0.305 | 0.521 |
+| **parent_l0_entity (L0→entity L1)** | **0.973** | **0.941** ⭐ | **0.320** | **0.564** |
+
+Entity grouping beats fixed-window on all metrics: MRR +1.0%, Recall +0.7%, Boundary Clarity +4.3%.
+
+### Current limitation: benchmark is pure-vector only
+
+The benchmark uses cosine similarity on embeddings — it does NOT use:
+- Graph traversal (BFS/DFS along edges)
+- PPR (Personalized PageRank on Atom-Entity graph)
+- Community-based routing
+- Am attribute filtering (maturity/confidence)
+
+A full system-level comparison (against AtomicRAG, GraphRAG, HippoRAG) would require:
+- Standard multi-hop QA datasets (HotpotQA, 2WikiMultiHop, MuSiQue)
+- Graph-based retrieval (PPR) implementation
+- End-to-end Answer Accuracy scoring
+
+---
+
 ## Future Improvements
 
-1. **Semantic scoring**: Replace word-level F1 with BertScore or embedding cosine for gold_alignment and faithfulness
-2. **Minimality dimension**: LLM-as-judge "can this knot be split further?"
-3. **Domain-specific eval set**: Annotate 100-200 QA pairs from actual vault technical documents
-4. **Scale downstream eval**: 50+ texts to properly stress embedding-based retrieval
-5. **LLM splitters in downstream**: Run v2_propositions through the retrieval pipeline
+1. **Graph-based retrieval benchmark**: Implement PPR on Knot-Entity graph, compare against pure-vector
+2. **Standard benchmark datasets**: HotpotQA / MuSiQue for system-level comparison with published baselines
+3. **Semantic scoring**: Replace word-level F1 with BertScore for gold_alignment and faithfulness
+4. **Am attribute weighting**: Use maturity/confidence to weight retrieval scores
+5. **Domain-specific eval set**: Annotate 100-200 QA pairs from actual vault technical documents
 6. **Confidence intervals**: Bootstrap sampling over cases to report statistical significance
