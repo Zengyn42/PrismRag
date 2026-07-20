@@ -1,8 +1,8 @@
-"""Multi-granularity Knot retrieval — 3-layer index (L0/L1/L2) + 5 retrieval strategies.
+"""Multi-granularity Knot retrieval — 3-layer index (L0/L1/L2) + retrieval strategies.
 
 Builds a hierarchical index from atomized knots:
   L0: Individual knots (atomic facts)
-  L1: Adjacent knot groups from same source (window-based)
+  L1: Adjacent knot groups from same source (window-based OR entity-based)
   L2: Leiden-clustered L1 groups with LLM-generated tags
 
 Retrieval strategies:
@@ -11,10 +11,14 @@ Retrieval strategies:
   parent_l0     — L0 cosine match, return parent L1 text
   multi_layer   — L2 tag filter -> L1 cosine within scope
   collapsed     — all L0+L1 vectors searched together (RAPTOR style)
+
+Entity-based L1 grouping groups adjacent L0 knots that share entities,
+producing more semantically coherent groups than fixed-window grouping.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -435,3 +439,262 @@ def retrieve_collapsed(
         return []
     indices = _find_top_k(query_vec, all_vectors, top_k)
     return [all_texts[i] for i in indices]
+
+
+# ---------------------------------------------------------------------------
+# Entity-based atomization and L1 grouping
+# ---------------------------------------------------------------------------
+
+ATOMIZE_WITH_ENTITIES_PROMPT = """\
+Decompose the following text into clear, simple propositions. Each proposition must be:
+- Self-contained — understandable without the original text
+- Atomic — one fact per proposition
+- Resolve ALL coreferences (replace pronouns with actual entity names)
+
+For each proposition, also list the key entities (people, tools, concepts, technical terms) mentioned.
+
+{doc_context_block}## Source text
+
+{section_text}
+
+## Output format
+
+Return ONLY a JSON array (no markdown fences, no commentary):
+[
+  {{"body": "<self-contained proposition>",
+   "entities": ["<entity1>", "<entity2>"]}}
+]
+"""
+
+
+def atomize_with_entities(
+    texts: list[str],
+    llm_fn,
+) -> tuple[list[str], list[list[str]], list[int]]:
+    """Atomize texts and extract entities for each knot.
+
+    Args:
+        texts: Source documents to atomize.
+        llm_fn: Function(str) -> str for LLM calls.
+
+    Returns:
+        (knot_texts, knot_entities, source_indices) where:
+        - knot_texts[i] is the proposition text
+        - knot_entities[i] is a list of normalized (lowercase) entity strings
+        - source_indices[i] is the index of the source text
+    """
+    from prism_rag.ingest.splitters.llm import _extract_json_array
+
+    knot_texts: list[str] = []
+    knot_entities: list[list[str]] = []
+    source_indices: list[int] = []
+
+    for idx, text in enumerate(texts):
+        if not text.strip():
+            continue
+
+        prompt = ATOMIZE_WITH_ENTITIES_PROMPT.format(
+            doc_context_block="",
+            section_text=text,
+        )
+
+        try:
+            raw = llm_fn(prompt)
+            # Strip thinking tags
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            items = _extract_json_array(raw)
+        except (ValueError, Exception) as exc:
+            logger.warning("Entity atomization failed for text %d: %s", idx, exc)
+            items = []
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            body = str(item.get("body", "")).strip()
+            if not body:
+                continue
+
+            # Extract entities, normalize to lowercase + strip
+            raw_entities = item.get("entities", [])
+            if not isinstance(raw_entities, list):
+                raw_entities = []
+            entities = [
+                e.strip().lower()
+                for e in raw_entities
+                if isinstance(e, str) and e.strip()
+            ]
+
+            knot_texts.append(body)
+            knot_entities.append(entities)
+            source_indices.append(idx)
+
+    logger.info(
+        "Entity atomization: %d knots from %d texts", len(knot_texts), len(texts)
+    )
+    return knot_texts, knot_entities, source_indices
+
+
+def build_l1_groups_by_entity(
+    l0_texts: list[str],
+    l0_entities: list[list[str]],
+    source_indices: list[int],
+    max_group_size: int = 5,
+) -> list[tuple[str, list[int], int]]:
+    """Group adjacent L0 knots that share entities.
+
+    Algorithm:
+    - Walk through L0 knots in order
+    - Start a new group
+    - Add next L0 if: same source AND shares >= 1 entity with current group
+    - Stop group if: different source OR no shared entity OR group size >= max_group_size
+    - Groups of size 1: merge with nearest neighbor (prefer previous group)
+
+    Entity matching is case-insensitive (entities are pre-normalized to lowercase).
+
+    Returns list of (l1_text, member_l0_indices, source_idx).
+    """
+    if not l0_texts:
+        return []
+
+    # Phase 1: build groups by entity overlap
+    groups: list[tuple[list[int], set[str], int]] = []  # (members, group_entities, src)
+
+    current_members: list[int] = [0]
+    current_entities: set[str] = set(l0_entities[0])
+    current_src: int = source_indices[0]
+
+    for i in range(1, len(l0_texts)):
+        this_entities = set(l0_entities[i])
+        this_src = source_indices[i]
+
+        # Check merge conditions
+        same_source = this_src == current_src
+        has_overlap = bool(current_entities & this_entities) if this_entities else False
+        under_limit = len(current_members) < max_group_size
+
+        if same_source and has_overlap and under_limit:
+            current_members.append(i)
+            current_entities |= this_entities
+        else:
+            # Finalize current group
+            groups.append((current_members, current_entities, current_src))
+            current_members = [i]
+            current_entities = set(this_entities)
+            current_src = this_src
+
+    # Don't forget the last group
+    groups.append((current_members, current_entities, current_src))
+
+    # Phase 2: merge singletons with nearest neighbor (prefer previous)
+    merged: list[tuple[list[int], int]] = []  # (members, src)
+    for idx, (members, entities, src) in enumerate(groups):
+        if len(members) == 1:
+            # Try to merge with previous group (same source, not at max)
+            if merged and merged[-1][1] == src and len(merged[-1][0]) < max_group_size:
+                merged[-1][0].extend(members)
+                continue
+            # Try to merge with next group (same source, not at max)
+            if idx + 1 < len(groups):
+                next_members, _next_ents, next_src = groups[idx + 1]
+                if next_src == src and len(next_members) < max_group_size:
+                    # Prepend to next group by modifying it in place
+                    groups[idx + 1] = (
+                        members + next_members,
+                        _next_ents | entities,
+                        next_src,
+                    )
+                    continue
+        merged.append((list(members), src))
+
+    # Build result tuples
+    result: list[tuple[str, list[int], int]] = []
+    for members, src in merged:
+        l1_text = " ".join(l0_texts[j] for j in members)
+        result.append((l1_text, members, src))
+
+    return result
+
+
+def build_multi_granularity_index_entity(
+    texts: list[str],
+    embedder_fn,
+    llm_fn,
+    max_group_size: int = 5,
+) -> MultiGranularityIndex:
+    """Build a 3-layer multi-granularity index using entity-based L1 grouping.
+
+    Like build_multi_granularity_index but uses entity-based L1 grouping
+    instead of fixed-window grouping.
+
+    Args:
+        texts: Source documents.
+        embedder_fn: Function(list[str]) -> list[list[float]].
+        llm_fn: Function(str) -> str for atomization and tag generation.
+        max_group_size: Maximum L0 knots per L1 group.
+
+    Returns:
+        MultiGranularityIndex with all layers populated.
+    """
+    # Step 1: L0 atomization with entities
+    l0_texts, l0_entities, l0_source_idx = atomize_with_entities(texts, llm_fn)
+
+    if not l0_texts:
+        return MultiGranularityIndex(
+            l0_texts=[], l0_vectors=[], l0_source_idx=[],
+            l1_texts=[], l1_vectors=[], l1_members=[], l1_source_idx=[],
+            l2_tags=[], l2_vectors=[], l2_members=[],
+            source_texts=texts, l1_to_l2=[],
+        )
+
+    # Step 2: L1 grouping by entity
+    l1_groups = build_l1_groups_by_entity(
+        l0_texts, l0_entities, l0_source_idx, max_group_size=max_group_size,
+    )
+    l1_texts = [g[0] for g in l1_groups]
+    l1_members = [g[1] for g in l1_groups]
+    l1_source_idx = [g[2] for g in l1_groups]
+    logger.info("L1 (entity): %d groups (max_group_size=%d)", len(l1_texts), max_group_size)
+
+    # Embed L0 and L1 in batches
+    batch_size = 32
+    all_texts_to_embed = l0_texts + l1_texts
+    all_vectors: list[list[float]] = []
+    for i in range(0, len(all_texts_to_embed), batch_size):
+        batch = all_texts_to_embed[i : i + batch_size]
+        vecs = embedder_fn(batch)
+        all_vectors.extend(vecs)
+
+    l0_vectors = all_vectors[: len(l0_texts)]
+    l1_vectors = all_vectors[len(l0_texts) :]
+
+    # Step 3: L2 clustering + tag generation
+    clusters = _cluster_l1_leiden(l1_vectors)
+    l2_tags = _generate_l2_tags(clusters, l1_texts, llm_fn)
+    logger.info("L2: %d clusters", len(clusters))
+
+    # Build l1_to_l2 mapping
+    l1_to_l2 = [0] * len(l1_texts)
+    for cluster_idx, members in enumerate(clusters):
+        for l1_idx in members:
+            l1_to_l2[l1_idx] = cluster_idx
+
+    # Embed L2 tags
+    if l2_tags:
+        l2_vectors = embedder_fn(l2_tags)
+    else:
+        l2_vectors = []
+
+    return MultiGranularityIndex(
+        l0_texts=l0_texts,
+        l0_vectors=l0_vectors,
+        l0_source_idx=l0_source_idx,
+        l1_texts=l1_texts,
+        l1_vectors=l1_vectors,
+        l1_members=l1_members,
+        l1_source_idx=l1_source_idx,
+        l2_tags=l2_tags,
+        l2_vectors=l2_vectors,
+        l2_members=clusters,
+        source_texts=texts,
+        l1_to_l2=l1_to_l2,
+    )
