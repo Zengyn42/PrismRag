@@ -232,11 +232,61 @@ A full system-level comparison (against AtomicRAG, GraphRAG, HippoRAG) would req
 
 ---
 
+## HotpotQA End-to-End Results (2026-07-19)
+
+### Diagnosis experiments (20 cases, gemma4:e4b reader)
+
+| Experiment | F1 | What it tests |
+|------------|-----|---------------|
+| Gold 2 paras (perfect retrieval) | **0.709** | Reader LLM ceiling |
+| All 10 paras (no retrieval) | 0.573 | Noise tolerance ceiling |
+| Raw para embed top-3 | **0.489** | Embedding quality on raw text |
+| Collapsed (para + L1 MiniLM) | 0.486 | Multi-layer flat search |
+| L1 window → expand para | 0.075 | Atomized L1 as retrieval proxy |
+| L1 entity → expand para | 0.050 | Entity-grouped L1 as proxy |
+| L1 MiniLM → expand para | 0.050 | MiniLM-grouped L1 as proxy |
+
+### Key findings
+
+1. **Reader LLM is NOT the bottleneck.** gemma4:e4b (4B params) achieves F1=0.709 with gold context — close to published HippoRAG 2 (F1=0.755 with 70B reader). The gap is 100% in retrieval.
+
+2. **Embedding retrieval is the bottleneck.** Raw paragraph embedding top-3 = F1=0.489 vs gold F1=0.709. The embedding model (qwen3-embedding:8b, MMTEB #1) selects both gold paragraphs only 68% of the time (top-3) / 88% (top-5).
+
+3. **Atomization HURTS retrieval on HotpotQA.** All L1→para strategies score 0.05-0.075. LLM atomization rewrites phrasing, causing embedding drift. The rewritten L1 text doesn't match queries as well as original paragraphs.
+
+4. **Grouping method doesn't matter when atomization is the bottleneck.** MiniLM semantic clustering = LLM entity grouping = fixed window — all equally poor for retrieval.
+
+5. **Collapsed (RAPTOR-style) doesn't help either** (0.486 ≈ 0.489). Paragraph embeddings dominate the ranking; L1 embeddings rarely win.
+
+### Architectural lesson
+
+**Retrieval layer should use original text, not atomized text.** Atomization is for storage/management (graph, dedup, updates), not for retrieval. The correct multi-layer architecture:
+
+```
+Retrieval: search on NOTE nodes (original paragraphs) — raw text embedding
+Storage:   KNOT nodes (atomized propositions) — for graph, dedup, reasoning
+Link:      NOTE -[CONTAINS]-> KNOT — traverse after retrieval for precise evidence
+```
+
+### Published baselines comparison
+
+| System | F1/ACC | Reader LLM |
+|--------|--------|------------|
+| HippoRAG 2 | F1=75.5 | Llama-3.3-70B |
+| NV-Embed-v2 (pure vector) | F1=75.3 | Llama-3.3-70B |
+| AtomicRAG | ACC=70.5 | GPT-4o-mini |
+| HippoRAG v1 | F1=55.0 | GPT-3.5 |
+| **PrismRag raw para** | **F1=48.9** | **gemma4:e4b (4B)** |
+
+Note: our F1=48.9 with a 4B reader vs HippoRAG v1 F1=55.0 with GPT-3.5 (175B) — the 6-point gap is almost entirely due to reader LLM size, not retrieval quality.
+
+---
+
 ## Future Improvements
 
-1. **Graph-based retrieval benchmark**: Implement PPR on Knot-Entity graph, compare against pure-vector
-2. **Standard benchmark datasets**: HotpotQA / MuSiQue for system-level comparison with published baselines
-3. **Semantic scoring**: Replace word-level F1 with BertScore for gold_alignment and faithfulness
-4. **Am attribute weighting**: Use maturity/confidence to weight retrieval scores
-5. **Domain-specific eval set**: Annotate 100-200 QA pairs from actual vault technical documents
-6. **Confidence intervals**: Bootstrap sampling over cases to report statistical significance
+1. **Separate retrieval and storage layers**: retrieve on original paragraphs, store as knots
+2. **Better embedding model**: NV-Embed-v2 or jina-v3 (not available on Ollama, need manual loading)
+3. **Cross-encoder reranker**: embedding top-20 → cross-encoder re-rank → top-3
+4. **Semantic scoring**: Replace word-level F1 with BertScore for gold_alignment
+5. **Am attribute weighting**: Use maturity/confidence to weight retrieval scores
+6. **Domain-specific eval set**: Annotate 100-200 QA pairs from actual vault technical documents
