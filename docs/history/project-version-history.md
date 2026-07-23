@@ -100,14 +100,54 @@ Jei test runner must use unique session names + `ctrl.switch_session()` to force
 - 修复了原来 `ingest-code` 无 viz、`ingest` 无代码 的两个缺口
 - 首次 ingest：Pulsify 1,684 nodes（1,643 code + 41 docs），95 communities
 
-## v6.0 — 可插拔原子化与知识基准（进行中，2026-07-18 立项）
+## v6.0 — 可插拔原子化与知识基准（COMPLETE, 2026-07-19）
 
+### Phase 1 — Splitter 接口 + KNOT 统一（commit 97a2814）
 - KNOT（Knowledge Ontology Token，知识元）统一类型：所有拆分方法输出 list[Knot]
-- Splitter 可插拔接口 + 5 个注册方法（passthrough/sentence/paragraph/fixed_window/llm）
+- Splitter 可插拔接口 + 5→7 个注册方法（+llm_gleanings, fixed_window）
 - LlmSplitter：版本化原子化 prompt（v1），后端可注入（Ollama/Claude CLI）
-- GraphRAG 吸收计划：Knot status 字段、gleanings 追捕、社区报告 + global_ask、增量选择性重算
-- B1 拆分质量 benchmark（Claim2Atom/FActScore 风格）
-- 详见 docs/v6.0-atomization-plan.md 与 docs/graphrag-comparison.md
+
+### Phase 2 — Knot 生命周期（commit 8eb5230）
+- Knot status 字段（confirmed/suspected/superseded）
+- GleaningsSplitter（GraphRAG gleaning rounds）
+- Knot payload 字段（结构化投影）
+- `flag_drift` MCP tool + `flag_knots_suspected()` 工具函数
+
+### Phase 3 — B1 Benchmark + 评测系统（commits 2224487, 486dee7, 23c51f5, b2a3f91）
+- **上游评测**：Propositionizer-wiki-data 42k gold propositions, 5 维评分（atomicity, self-containedness, faithfulness, coverage, gold-alignment F1）
+- **5 种 prompt 策略对比**：v2_propositions（Dense X 风格）Gold-F1=0.780 最优
+- **下游评测**：6 指标（recall, MRR, IoU, context_sufficiency, boundary_clarity）
+- **多粒度 Knot 检索**：L0/L1/L2 三层架构, 5 种检索策略, L1 分组 MRR 0.927（最优）
+- **实体共现分组**：LLM 实体提取 + 共享实体聚合, MRR 0.941, Boundary +4.3%
+- **HotpotQA 多跳 QA**：PPR 检索 on Atom-Entity 二部图
+- **端到端诊断**：reader 不是瓶颈（gold ctx F1=0.709），检索是瓶颈（embed F1=0.489）
+- **核心发现**：检索层应用原始段落，原子化用于存储/图谱/推理层
+
+### Phase 4 — Community Reports + global_ask（commit 8eb5230）
+- LLM 社区报告（title/summary/rating/findings）
+- `global_ask` MCP tool：map-reduce 跨社区问答
+- `generate_community_reports` MCP tool
+
+### 文档
+- `docs/v6.0-atomization-plan.md` — 总体计划
+- `docs/benchmark-evaluation-system.md` — 评测体系完整记录
+- `docs/multi-granularity-knot-architecture.md` — 多粒度架构设计探索
+- `docs/multi-granularity-algorithm.md` — 算法规格
+
+### 测试
+- **188 新增测试**（drift 9, gleanings 12, benchmark 25, community 18, downstream 42, multi-gran 21, entity 20, HotpotQA 18, 其他 23）
+- 总计 **778 tests pass**（8 pre-existing failures unchanged）
+
+### 关键 commits
+| Commit | 内容 |
+|--------|------|
+| `97a2814` | Phase 1: Splitter 接口 |
+| `8eb5230` | Phase 2-4: drift + benchmark + community |
+| `2224487` | 两层评测系统 |
+| `486dee7` | 多粒度 L0/L1/L2 |
+| `23c51f5` | 实体共现分组 |
+| `b2a3f91` | HotpotQA + PPR |
+| `927d8d1` | 端到端诊断 |
 
 ## v7.0（原 v6.0）— 联邦元图，设计规划（未实现）
 
