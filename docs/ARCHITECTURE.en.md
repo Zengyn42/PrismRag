@@ -261,31 +261,53 @@ prism-rag atomize promote <id>   # approve → write to graph
 
 ---
 
-## MCP Server (18 tools)
+## MCP Server (30 tools)
 
-Started with `prism-rag serve`. Supports both stdio and SSE transports.
+Started with `prism-rag serve`. Supports both stdio and SSE transports. See `docs/MCP_TOOLS.md` for full reference.
 
-### Retrieval Tools
-
-| Tool | Purpose |
-|---|---|
-| `search_knowledge` | Main retrieval (hybrid: BM25 + entry + BFS) |
-| `explain_node` | Node details + neighbor overview |
-| `trace_path` | Shortest path between two nodes |
-| `list_communities` | List all communities + hub nodes |
-| `explore_community` | Drill into a community |
-
-### Atomize Tools
+### Graph Query Tools (7)
 
 | Tool | Purpose |
 |---|---|
-| `atomize_document` | LLM splits node into atomic fragments |
-| `inbox_review` | List pending proposals |
-| `inbox_promote` | Approve proposal and write to graph |
+| `search_knowledge` | Main retrieval (hybrid: BM25 + embedding + exact, BFS/DFS traversal) |
+| `explain_node` | Node details + all edges + community info |
+| `trace_path` | Shortest path between two nodes (incl. cross-namespace) |
+| `communities` | Community list / member details (merged list/explore) |
+| `impact` | Change impact analysis (blast radius) |
+| `list_namespaces` | Federated graph namespace stats |
+| `generate_graph` | Generate interactive HTML visualization |
 
-### Vault CRUD Tools (11 tools)
+### Knowledge Atomization Tools (5)
 
-Read, create, update, delete notes in an Obsidian vault; supports frontmatter operations, alias management, etc.
+| Tool | Purpose |
+|---|---|
+| `atomize_scan` | Scan document structure (step 1 of scan/propose/apply) |
+| `atomize_propose` | Submit atomization claims (with semantic dedup) |
+| `atomize_apply` | Execute proposal, create knowledge/*.md files |
+| `alloc_knowledge_id` | Allocate globally unique KNOW-IDs |
+| `list_knowledge_nodes` | List knowledge nodes in the graph |
+
+### Edge Management + Drift Detection Tools (6)
+
+| Tool | Purpose |
+|---|---|
+| `pending_edges` | List / inspect pending cross-namespace edges |
+| `review_pending_edge` | Approve or reject a pending edge |
+| `check_drift` | Detect stale mentions_symbol edges |
+| `flag_drift` | Auto-flag affected KNOTs as suspected |
+| `rollback_dedup` | Roll back graph effects of a dedup decision |
+| `list_dedup_log` | View dedup decision log |
+
+### Community Intelligence Tools (2)
+
+| Tool | Purpose |
+|---|---|
+| `generate_community_reports` | Generate LLM reports for Leiden communities |
+| `global_ask` | Map-reduce cross-community Q&A |
+
+### Vault CRUD Tools (10)
+
+Read, create, update, delete notes in an Obsidian vault; supports frontmatter operations, tag management, keyword search, wikilink queries, etc.
 
 ---
 
@@ -319,6 +341,49 @@ Each target (vault or repo) has its own isolated `.prismrag/` directory.
 | Visualization | [force-graph](https://github.com/vasturiano/force-graph) (WebGL Canvas) |
 | MCP Server | `mcp` official SDK (FastMCP) |
 | Configuration | `pydantic-settings` (.env / environment variables) |
+
+---
+
+## v6.0 Additions: Pluggable Atomization & Knowledge Benchmarks
+
+### Splitter Framework (`prism_rag/ingest/splitters/`)
+
+Pluggable document splitting interface where all methods output `list[Knot]`. 7 built-in strategies: `sentence`, `llm` (versioned prompts), `llm_gleanings` (GraphRAG gleaning rounds), `fixed_window`, etc. LLM backend is injectable (Ollama / Claude CLI).
+
+### Knot Lifecycle
+
+KNOT (Knowledge Ontology Token) nodes now carry a `status` field:
+
+| Status | Meaning |
+|--------|---------|
+| `confirmed` | Verified knowledge (default) |
+| `suspected` | Associated code has changed; needs human review |
+| `superseded` | Replaced by a newer version of the knowledge |
+
+The `flag_drift` MCP tool automatically marks KNOTs as `suspected` when their linked code symbols no longer exist.
+
+### Benchmark Harness (`prism_rag/ingest/splitters/benchmark/`)
+
+- **Upstream evaluation**: Based on Propositionizer-wiki-data (42k gold propositions), 5-dimension scoring (atomicity, self-containedness, faithfulness, coverage, gold-alignment F1)
+- **Downstream evaluation**: 6 metrics (recall, MRR, IoU, context_sufficiency, boundary_clarity)
+- 5 prompt strategy comparison; `v2_propositions` (Dense X style) performs best
+
+### Community Reports + global_ask
+
+- `generate_community_reports` MCP tool: generates LLM community reports (title/summary/rating/findings) for all Leiden communities, cached to `community_reports.json`
+- `global_ask` MCP tool: map-reduce cross-community Q&A, synthesizes answers from all relevant communities
+
+### Multi-Granularity Knot Architecture (Evolving Design)
+
+Three-layer retrieval architecture (still under development):
+
+| Layer | Meaning | Retrieval Role |
+|-------|---------|----------------|
+| L0 | Atomic proposition (Knot) | Storage / reasoning unit |
+| L1 | Group of 2-4 adjacent knots | Optimal retrieval unit (MRR 0.927) |
+| L2 | Leiden cluster + LLM-generated tag | Routing / filtering layer |
+
+See `docs/multi-granularity-knot-architecture.md` and `docs/multi-granularity-algorithm.md` for details.
 
 ---
 

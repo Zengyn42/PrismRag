@@ -6,6 +6,30 @@ originSessionId: 6d54d2e1-ac3a-472e-9e85-aff67972652c
 ---
 PrismRag MCP server lives at `/home/kingy/Foundation/PrismRag/`, running SSE mode on port 8102.
 
+## v3.2 — Obsidian 多模态 RAG 系统 Phase 2（SUPERSEDED by v4.0）
+
+**What:** Finalized Phase 2 GraphRAG architecture via 3-round Claude-Gemini debate (ADR #46-52). Added Leiden community detection with soft-membership, Ensemble Retrieval + RRF fusion, Cross-encoder Re-ranking, and progressive activation. Core tech stack: Gemini Embedding 2 + LanceDB (replaced Qdrant + SQLite in v3.0). Entire vector-retrieval approach superseded by v4.0's graph-first design.
+
+**Key decisions:** LanceDB unified storage, privacy-first API policy, Matryoshka embedding dimensions, checkpoint sync mechanism.
+
+**Design doc:** `Obsidian多模态RAG系统架构设计-v3.2.md`
+
+## v5.0 — ParseTree & StorageBackend 架构（COMPLETE）
+
+**What:** Introduced the ParseTree abstraction layer — code and documents are both trees (note→section→block, module→class→function). ParseTree is storage-agnostic; StorageBackend (NetworkXBackend today, KuzuBackend future) handles persistence. Defined TreeNode schema with kind-specific metadata for doc, code, and conversation namespaces. Laid the groundwork for unified ingest of any structured source.
+
+**Key concepts:** `TreeNode` dataclass (id, kind, label, content, namespace, children, metadata), `StorageBackend.write_tree()` abstraction, kind enumeration (note/knowledge/section/block/module/class/function/fact).
+
+**Design docs:** `PrismRag v5.0 — ParseTree & StorageBackend 架构设计.md`, `PrismRag v5.0 — 通用图引擎架构设计.md`, `PrismRag v5.0 — 详细设计与任务分解.md`
+
+## v5.1 — mentions_symbol 跨命名空间链接（COMPLETE）
+
+**What:** Built structural cross-namespace edges between vault docs (nimbus) and code symbols (code). Two-level matching: Level 1 wikilink exact reference (`[[build_graph]]` → EXTRACTED/1.0), Level 2 symbol name word-boundary regex match (INFERRED/0.9, with length/blacklist/uniqueness filters). Level 3 embedding similarity deferred (already covered by FederatedGraph bridge).
+
+**Key capabilities enabled:** BFS can traverse from doc to code and back, `impact` can find docs mentioning a changed symbol, incremental ingest can flag stale docs when code changes.
+
+**Design doc:** `PrismRag v5.1 — mentions_symbol 跨命名空间链接设计.md`
+
 ## v5.2 — md↔code 跨命名空间链接（COMPLETE, tested 2026-05-08）
 
 **What:** Built edges between nimbus namespace (vault markdown docs) and code namespace (source code symbols).

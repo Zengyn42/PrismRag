@@ -261,31 +261,53 @@ prism-rag atomize promote <id>   # 批准 → 写入图
 
 ---
 
-## MCP Server（18 tools）
+## MCP Server（30 tools）
 
-`prism-rag serve` 启动，支持 stdio 和 SSE 两种 transport。
+`prism-rag serve` 启动，支持 stdio 和 SSE 两种 transport。详见 `docs/MCP_TOOLS.md`。
 
-### 检索工具
-
-| 工具 | 用途 |
-|---|---|
-| `search_knowledge` | 主检索（hybrid: BM25 + entry + BFS） |
-| `explain_node` | 返回节点详情 + 邻居概览 |
-| `trace_path` | 两节点间最短路径 |
-| `list_communities` | 列出所有社区 + hub nodes |
-| `explore_community` | 深入某个社区 |
-
-### Atomize 工具
+### 图查询工具（7）
 
 | 工具 | 用途 |
 |---|---|
-| `atomize_document` | LLM 拆分节点为原子片段 |
-| `inbox_review` | 列出待审核提案 |
-| `inbox_promote` | 批准提案写入图 |
+| `search_knowledge` | 主检索（hybrid: BM25 + embedding + exact，BFS/DFS 遍历） |
+| `explain_node` | 节点详情 + 全部出入边 + 社区信息 |
+| `trace_path` | 两节点间最短路径（含跨 namespace） |
+| `communities` | 社区列表 / 社区成员详情（合并了 list/explore） |
+| `impact` | 变更影响分析（blast radius） |
+| `list_namespaces` | 联邦图命名空间统计 |
+| `generate_graph` | 生成交互式 HTML 可视化 |
 
-### Vault CRUD 工具（11 个）
+### 知识原子化工具（5）
 
-读取、创建、更新、删除 Obsidian vault 中的笔记；支持 frontmatter 操作、alias 管理等。
+| 工具 | 用途 |
+|---|---|
+| `atomize_scan` | 扫描文档结构（scan → propose → apply 三阶段第一步） |
+| `atomize_propose` | 提交原子化 claims（含语义去重） |
+| `atomize_apply` | 执行 proposal，生成 knowledge/*.md |
+| `alloc_knowledge_id` | 分配全局唯一 KNOW-ID |
+| `list_knowledge_nodes` | 列出图中的 knowledge 节点 |
+
+### 边管理 + 漂移检测工具（6）
+
+| 工具 | 用途 |
+|---|---|
+| `pending_edges` | 列出 / 查看待审核跨 namespace 边 |
+| `review_pending_edge` | 批准或拒绝待审核边 |
+| `check_drift` | 检测 mentions_symbol 边是否已失效 |
+| `flag_drift` | 自动将失效关联 KNOT 标记为 suspected |
+| `rollback_dedup` | 回滚去重决策的图副作用 |
+| `list_dedup_log` | 查看去重决策日志 |
+
+### 社区智能工具（2）
+
+| 工具 | 用途 |
+|---|---|
+| `generate_community_reports` | 为 Leiden 社区生成 LLM 报告 |
+| `global_ask` | map-reduce 跨社区问答 |
+
+### Vault CRUD 工具（10）
+
+读取、创建、更新、删除 Obsidian vault 中的笔记；支持 frontmatter 操作、tag 管理、关键词搜索、wikilink 查询等。
 
 ---
 
@@ -319,6 +341,49 @@ prism-rag atomize promote <id>   # 批准 → 写入图
 | 可视化 | [force-graph](https://github.com/vasturiano/force-graph)（WebGL Canvas） |
 | MCP Server | `mcp` 官方 SDK（FastMCP） |
 | 配置 | `pydantic-settings`（.env / 环境变量） |
+
+---
+
+## v6.0 新增：可插拔原子化与知识基准
+
+### Splitter 框架（`prism_rag/ingest/splitters/`）
+
+可插拔的文档拆分接口，所有拆分方法统一输出 `list[Knot]`。内置 7 种策略：`sentence`、`llm`（版本化 prompt）、`llm_gleanings`（GraphRAG gleaning rounds）、`fixed_window` 等。LLM 后端可注入（Ollama / Claude CLI）。
+
+### Knot 生命周期
+
+KNOT（Knowledge Ontology Token，知识元）新增 `status` 字段：
+
+| 状态 | 含义 |
+|------|------|
+| `confirmed` | 已确认的知识（默认） |
+| `suspected` | 关联代码已变更，需人工复核 |
+| `superseded` | 已被新版知识替代 |
+
+`flag_drift` MCP tool 自动将关联代码已失效的 KNOT 标记为 `suspected`。
+
+### Benchmark 评测（`prism_rag/ingest/splitters/benchmark/`）
+
+- **上游评测**：基于 Propositionizer-wiki-data（42k gold propositions），5 维评分（atomicity、self-containedness、faithfulness、coverage、gold-alignment F1）
+- **下游评测**：6 指标（recall、MRR、IoU、context_sufficiency、boundary_clarity）
+- 5 种 prompt 策略对比，v2_propositions（Dense X 风格）最优
+
+### Community Reports + global_ask
+
+- `generate_community_reports` MCP tool：为所有 Leiden 社区生成 LLM 社区报告（title/summary/rating/findings），缓存到 `community_reports.json`
+- `global_ask` MCP tool：map-reduce 跨社区问答，整合所有相关社区的知识回答问题
+
+### 多粒度 Knot 架构（设计探索中）
+
+三层检索架构（仍在演进）：
+
+| 层级 | 含义 | 检索角色 |
+|------|------|----------|
+| L0 | 原子命题（Knot） | 存储 / 推理单元 |
+| L1 | 2-4 个相邻 knot 分组 | 最优检索单元（MRR 0.927） |
+| L2 | Leiden 聚类 + LLM 标签 | 路由 / 过滤层 |
+
+详见 `docs/multi-granularity-knot-architecture.md` 和 `docs/multi-granularity-algorithm.md`。
 
 ---
 
